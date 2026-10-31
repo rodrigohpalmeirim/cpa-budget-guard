@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Budgets</title>
+<script>
+  // Apply the theme before first paint: mirror the panel (same-origin iframe) or its stored choice.
+  (function () {
+    function stored() {
+      try { var s = JSON.parse(localStorage.getItem("cli-proxy-theme") || "{}"); return (s.state && s.state.theme) || "auto"; }
+      catch (e) { return "auto"; }
+    }
+    var t;
+    try { if (window.parent !== window) t = window.parent.document.documentElement.getAttribute("data-theme") || "light"; } catch (e) {}
+    if (!t) { t = stored(); if (t === "auto") t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "white"; }
+    if (t === "dark" || t === "white") document.documentElement.setAttribute("data-theme", t);
+  })();
+</script>
+<style>
+/* Design tokens: copied from Cli-Proxy-API-Management-Center (src/styles/themes.scss). */
+:root {
+  --bg-secondary:#faf9f5; --bg-primary:#f0eee8; --bg-tertiary:#e9e6df; --bg-hover:#e9e6df; --floating-surface:#fffdf9;
+  --floating-shadow:0 12px 26px rgba(0,0,0,.14);
+  --text-primary:#2d2a26; --text-secondary:#6d6760; --text-tertiary:#a29c95; --text-quaternary:#c0bab3;
+  --border-color:#e3e1db; --border-primary:#d5d2cb; --border-hover:#cecac4;
+  --primary-color:#8b8680; --primary-hover:#7f7a74; --primary-active:#726d67; --primary-contrast:#fff;
+  --success-color:#10b981; --quota-medium-color:#e0aa14; --error-color:#c65746;
+  --viz-success:#10b981; --viz-failure:#c65746;
+  --success-badge-bg:#d1fae5; --success-badge-text:#065f46; --success-badge-border:#6ee7b7;
+  --failure-badge-bg:rgba(198,87,70,.14); --failure-badge-text:#8a3a30; --failure-badge-border:rgba(198,87,70,.35);
+  --count-badge-bg:rgba(139,134,128,.18); --count-badge-text:#726d67;
+  --shadow:0 1px 2px 0 rgb(0 0 0 / .08); --shadow-lg:0 10px 18px -3px rgb(0 0 0 / .1);
+  --ease-out-strong:cubic-bezier(.23,1,.32,1);
+  --font:-apple-system,BlinkMacSystemFont,'Segoe UI','Roboto','Oxygen','Ubuntu','Cantarell','Fira Sans','Droid Sans','Helvetica Neue',sans-serif;
+  --mono:ui-monospace,'SF Mono','Cascadia Mono','JetBrains Mono','Fira Code',Menlo,Consolas,'Liberation Mono',monospace;
+}
+[data-theme='white'] {
+  --bg-secondary:#fff; --bg-primary:#fff; --bg-tertiary:#f6f6f6; --bg-hover:#f6f6f6; --floating-surface:#fff;
+  --border-color:#e5e5e5; --border-primary:#d9d9d9; --border-hover:#ccc;
+}
+[data-theme='dark'] {
+  --bg-secondary:#151412; --bg-primary:#1d1b18; --bg-tertiary:#262320; --bg-hover:#2e2a26; --floating-surface:#2a2723;
+  --floating-shadow:0 14px 30px rgba(0,0,0,.4);
+  --text-primary:#f6f4f1; --text-secondary:#c9c3bb; --text-tertiary:#9c958d; --text-quaternary:#6f6962;
+  --border-color:#3a3530; --border-primary:#4a453f; --border-hover:#5a544d;
+  --primary-hover:#9a948e; --primary-active:#a6a099; --quota-medium-color:#ffd862;
+  --success-badge-bg:rgba(6,78,59,.3); --success-badge-text:#6ee7b7; --success-badge-border:#059669;
+  --failure-badge-bg:rgba(198,87,70,.24); --failure-badge-text:#f1b0a6; --failure-badge-border:rgba(198,87,70,.5);
+  --count-badge-bg:rgba(139,134,128,.28); --count-badge-text:#a6a099;
+  --shadow:0 1px 3px 0 rgb(0 0 0 / .3); --shadow-lg:0 10px 15px -3px rgb(0 0 0 / .3);
+}
+
+* { box-sizing:border-box; }
+html, body { margin:0; background:var(--bg-secondary); color:var(--text-primary); font-family:var(--font); font-size:14px; line-height:1.5; }
+body { padding:28px clamp(20px,3vw,40px) 48px; }
+button, input, select { font:inherit; }
+.mono, .num { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+
+/* Page header (QuotaHeader) */
+.page { display:flex; flex-direction:column; gap:28px; max-width:1320px; }
+.header { display:flex; align-items:flex-end; justify-content:space-between; gap:16px 24px; flex-wrap:wrap; }
+.copy { display:flex; flex-direction:column; gap:7px; min-width:0; }
+.title { margin:0; font-size:clamp(26px,3.2vw,30px); line-height:1.15; font-weight:700; letter-spacing:-.02em; }
+.meta { margin:0; display:flex; align-items:baseline; flex-wrap:wrap; gap:4px 8px; font-family:var(--mono); font-size:13px; font-weight:500;
+  font-variant-numeric:tabular-nums; letter-spacing:.02em; color:var(--text-secondary); }
+.meta::before { content:'▍'; color:var(--viz-success); font-size:13px; line-height:1; align-self:center; margin-right:1px; }
+.meta .dot { color:var(--text-quaternary); user-select:none; }
+.meta .bad { color:var(--viz-failure); }
+.actions { display:flex; gap:8px; flex-wrap:wrap; }
+
+/* Buttons / inputs (components.scss) */
+.btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; border:1px solid transparent; border-radius:8px; padding:10px 14px;
+  font-weight:600; cursor:pointer; transition:all 150ms ease; background:var(--bg-secondary); color:var(--text-primary); white-space:nowrap; }
+.btn:active { transform:scale(.97); }
+.btn-primary { background:var(--primary-color); color:var(--primary-contrast); border-color:var(--primary-color); }
+.btn-primary:hover { background:var(--primary-hover); border-color:var(--primary-hover); }
+.btn-secondary { background:var(--bg-tertiary); border-color:var(--border-color); }
+.btn-secondary:hover { background:var(--bg-hover); border-color:var(--border-hover); }
+.btn-ghost { background:transparent; color:var(--text-secondary); }
+.btn-ghost:hover { color:var(--text-primary); background:var(--bg-tertiary); }
+.btn-danger { background:var(--error-color); border-color:var(--error-color); color:#fff; }
+.btn-danger:hover { filter:brightness(.95); }
+.btn-sm { padding:6px 10px; font-size:13px; }
+.btn-icon { padding:6px; width:32px; height:32px; }
+.btn:disabled { opacity:.6; cursor:not-allowed; }
+[data-theme='dark'] .btn-secondary, [data-theme='dark'] .btn-ghost:hover { color:#fff; }
+.btn svg { width:16px; height:16px; flex:none; }
+.input, select.input { width:100%; border:1px solid var(--border-color); border-radius:8px; padding:9px 12px; background:var(--bg-secondary);
+  color:var(--text-primary); transition:border-color 150ms ease, box-shadow 150ms ease; }
+.input:focus { outline:none; border-color:var(--primary-color); box-shadow:0 0 0 3px rgba(139,134,128,.18); }
+.input.num { text-align:right; }
+.field { display:flex; flex-direction:column; gap:4px; margin-bottom:16px; }
+.field label { font-weight:600; }
+.hint { color:var(--text-secondary); font-size:13px; }
+.err-text { color:var(--error-color); font-size:13px; }
+
+/* Sections + cards (QuotaCard) */
+.section { display:flex; flex-direction:column; gap:12px; }
+.section-head { display:flex; flex-direction:column; gap:2px; }
+.section-title { margin:0; font-size:18px; font-weight:700; }
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,360px),1fr)); gap:14px; }
+.card { position:relative; display:flex; flex-direction:column; gap:12px; padding:15px 16px; border-radius:14px; border:1px solid var(--border-color);
+  background:color-mix(in srgb,var(--bg-primary) 82%,transparent);
+  transition:transform 200ms var(--ease-out-strong), border-color 200ms var(--ease-out-strong), box-shadow 200ms var(--ease-out-strong); }
+@media (hover:hover) and (pointer:fine) { .card:hover { transform:translateY(-2px); border-color:var(--border-hover); box-shadow:0 12px 26px -14px rgb(0 0 0 / .16); } }
+.card.blocked { border-color:var(--failure-badge-border); }
+.card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+.card-title { font-size:16px; font-weight:700; line-height:1.3; overflow-wrap:anywhere; }
+.card-sub { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:4px; }
+.card-tools { display:flex; gap:2px; flex:none; }
+.group { display:flex; flex-direction:column; gap:9px; }
+.group + .group { padding-top:11px; border-top:1px dashed color-mix(in srgb,var(--border-color) 80%,transparent); }
+.group-title { font-size:12px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:var(--text-tertiary); }
+.muted { color:var(--text-tertiary); }
+
+/* Badges / chips */
+.badge { display:inline-flex; align-items:center; gap:6px; padding:2px 9px; border-radius:9999px; font-size:12px; font-weight:500; border:1px solid var(--border-color);
+  color:var(--text-secondary); background:var(--bg-secondary); white-space:nowrap; }
+.badge.ok { background:var(--success-badge-bg); color:var(--success-badge-text); border-color:var(--success-badge-border); }
+.badge.bad { background:var(--failure-badge-bg); color:var(--failure-badge-text); border-color:var(--failure-badge-border); }
+.badge.count { background:var(--count-badge-bg); color:var(--count-badge-text); border-color:transparent; }
+.badge .pip { width:6px; height:6px; border-radius:50%; background:currentColor; }
+.chip-key { font-family:var(--mono); font-size:12px; color:var(--text-secondary); background:var(--bg-tertiary); border-radius:6px; padding:1px 7px; }
+
+/* Meters (QuotaMeter) */
+.meter-row { display:flex; flex-direction:column; gap:5px; }
+.meter-label { display:flex; align-items:baseline; justify-content:space-between; gap:8px; font-size:13px; }
+.meter-label .name { color:var(--text-secondary); }
+.meter-label .val { font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:12.5px; }
+.meter-label .val .lim { color:var(--text-tertiary); }
+.bar { position:relative; height:6px; border-radius:9999px; background:color-mix(in srgb,var(--text-primary) 8%,transparent); }
+.bar .fill { position:absolute; left:0; top:0; bottom:0; border-radius:9999px; transform-origin:left center;
+  transition:width 360ms var(--ease-out-strong); }
+/* Bars fill in on first load only (auto-refresh re-renders every 30s). */
+.first .bar .fill { animation:fill 480ms var(--ease-out-strong) both; animation-delay:calc(var(--i,0)*40ms); }
+.bar .tick { position:absolute; top:-3px; bottom:-3px; width:2px; margin-left:-1px; border-radius:1px; background:var(--text-primary); opacity:.55; }
+.fill.g { background:var(--viz-success); } .fill.y { background:var(--quota-medium-color); } .fill.r { background:var(--viz-failure); } .fill.n { background:var(--primary-color); }
+@keyframes fill { from { transform:scaleX(0); } }
+.window { display:flex; flex-direction:column; gap:8px; }
+.window + .window { padding-top:9px; }
+.window-head { display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:13px; font-weight:600; }
+.window-foot { display:flex; justify-content:space-between; gap:8px; font-size:12px; color:var(--text-tertiary); font-family:var(--mono); font-variant-numeric:tabular-nums; }
+
+/* Empty state */
+.empty { border:1px dashed var(--border-primary); border-radius:14px; padding:36px 20px; text-align:center; display:flex; flex-direction:column; align-items:center; gap:10px; }
+.empty-title { font-weight:700; font-size:16px; } .empty-desc { color:var(--text-secondary); max-width:520px; }
+.error-box { border:1px solid var(--error-color); background:rgba(198,87,70,.1); color:var(--error-color); border-radius:8px; padding:12px 16px; }
+
+/* Modal */
+.overlay { position:fixed; inset:0; background:rgba(0,0,0,.35); display:flex; align-items:center; justify-content:center; padding:24px; z-index:20;
+  animation:ov .25s ease-out both; }
+@keyframes ov { from { opacity:0; } }
+.modal { background:var(--bg-primary); border:1px solid var(--border-color); border-radius:12px; box-shadow:0 10px 15px -3px rgb(0 0 0 / .1);
+  width:min(680px,100%); max-height:90vh; display:flex; flex-direction:column; overflow:hidden; animation:mi .3s cubic-bezier(.34,1.56,.64,1) both; }
+@keyframes mi { from { opacity:0; transform:scale(.92) translateY(14px); } }
+.modal-header { display:flex; align-items:center; justify-content:space-between; padding:16px 24px; border-bottom:1px solid var(--border-color); }
+.modal-title { font-weight:700; font-size:18px; }
+.modal-body { padding:20px 24px; overflow:auto; }
+.modal-footer { padding:14px 24px; border-top:1px solid var(--border-color); display:flex; justify-content:flex-end; gap:8px; }
+.close { width:32px; height:32px; border-radius:50%; border:1px solid var(--border-color); background:var(--bg-secondary); color:var(--text-secondary);
+  display:inline-flex; align-items:center; justify-content:center; cursor:pointer; transition:all .15s ease; }
+.close:hover { color:var(--text-primary); background:var(--bg-tertiary); transform:scale(1.08); }
+.tabs { display:flex; gap:4px; border-bottom:1px solid var(--border-color); margin:4px 0 12px; }
+.tab { border:0; background:none; padding:8px 12px; cursor:pointer; color:var(--text-secondary); font-weight:600; border-bottom:2px solid transparent; margin-bottom:-1px; }
+.tab.on { color:var(--text-primary); border-color:var(--primary-color); }
+table.edit { width:100%; border-collapse:collapse; }
+table.edit th { text-align:left; font-size:12px; font-weight:600; color:var(--text-tertiary); padding:6px 8px; border-bottom:1px solid var(--border-color); }
+table.edit td { padding:6px 8px; border-bottom:1px solid color-mix(in srgb,var(--border-color) 60%,transparent); vertical-align:middle; }
+table.edit td.w { width:130px; }
+.pct { position:relative; } .pct::after { content:'%'; position:absolute; right:10px; top:50%; transform:translateY(-50%); color:var(--text-tertiary); pointer-events:none; }
+.pct .input { padding-right:26px; }
+.keyline { display:flex; gap:8px; } .keyline .input { font-family:var(--mono); font-size:13px; }
+pre.snippet { margin:6px 0 14px; padding:12px 14px; background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:8px; font-family:var(--mono);
+  font-size:12.5px; white-space:pre-wrap; overflow-wrap:anywhere; position:relative; padding-right:96px; }
+pre.snippet .btn { position:absolute; top:6px; right:6px; }
+details summary { cursor:pointer; color:var(--text-secondary); font-weight:600; margin:6px 0; }
+
+/* Toast */
+.toasts { position:fixed; right:20px; bottom:20px; display:flex; flex-direction:column; gap:8px; z-index:30; }
+.toast { background:var(--floating-surface); box-shadow:var(--floating-shadow); border:1px solid var(--border-color); border-radius:10px; padding:10px 14px;
+  min-width:240px; max-width:420px; animation:ti .3s var(--ease-out-strong) both; }
+.toast.bad { border-color:var(--failure-badge-border); color:var(--failure-badge-text); }
+@keyframes ti { from { opacity:0; transform:translateY(8px); } }
+.spin { width:14px; height:14px; border:2px solid color-mix(in srgb,var(--text-primary) 20%,transparent); border-top-color:var(--text-primary); border-radius:50%; animation:sp .8s linear infinite; }
+@keyframes sp { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion:reduce) { *, *::before, *::after { animation:none !important; transition:none !important; } }
+</style>
+</head>
+<body class="first">
+<div class="page" id="app"><div class="header"><div class="copy"><h1 class="title">Budgets</h1><p class="meta">loading</p></div></div></div>
+<div class="toasts" id="toasts"></div>
+<div id="modal-root"></div>
+<script>
+"use strict";
+const STATUS = "/v0/management/budget-guard/status";
+const PLUGIN_CFG = "/v8/management/config/plugins/configs/budget-guard";
+const API_KEYS = "/v8/management/config/access/api-keys";
+const PROVIDERS = { claude: "Claude", codex: "Codex" };
+const ICON = {
+  plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>',
+  plug: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M6 8h12v4a6 6 0 0 1-12 0Z"/><path d="M12 18v4"/></svg>',
+  gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>',
+  refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4L21 8"/><path d="M21 3v5h-5"/></svg>',
+  copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>',
+  x: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+};
+
+/* ---------- theme: follow the panel ---------- */
+(function followPanelTheme() {
+  try {
+    if (window.parent === window) return;
+    const root = window.parent.document.documentElement;
+    const sync = () => { const t = root.getAttribute("data-theme"); t ? document.documentElement.setAttribute("data-theme", t) : document.documentElement.removeAttribute("data-theme"); };
+    new MutationObserver(sync).observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+    sync();
+  } catch (e) { /* not same-origin: keep the initial theme */ }
+})();
+
+/* ---------- management API ---------- */
+// Reuse the management key the panel stored (same origin), or ask once and keep it for this
+// browser session. A reverse proxy that injects the key also works: any value is then replaced.
+function panelKey() {
+  try {
+    const raw = localStorage.getItem("cli-proxy-auth");
+    if (!raw || !raw.startsWith("enc::v2::")) return "";
+    const k = new TextEncoder().encode("cli-proxy-api-webui::secure-storage|" + location.host);
+    const b = atob(raw.slice(9)); const out = new Uint8Array(b.length);
+    for (let i = 0; i < b.length; i++) out[i] = b.charCodeAt(i) ^ k[i % k.length];
+    return (JSON.parse(new TextDecoder().decode(out)).state || {}).managementKey || "";
+  } catch (e) { return ""; }
+}
+let mgmtKey = sessionStorage.getItem("budgetGuardKey") || panelKey();
+async function api(method, path, body) {
+  const headers = { "Accept": "application/json" };
+  if (mgmtKey) headers.Authorization = "Bearer " + mgmtKey;
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const r = await fetch(path, { method, headers, credentials: "same-origin", body: body === undefined ? undefined : JSON.stringify(body) });
+  if (r.status === 401 || (r.status === 404 && !mgmtKey)) {
+    const k = await askKey();
+    if (k) { mgmtKey = k; sessionStorage.setItem("budgetGuardKey", k); return api(method, path, body); }
+  }
+  const text = await r.text();
+  let data; try { data = text ? JSON.parse(text) : null; } catch (e) { data = text; }
+  if (!r.ok) throw new Error((data && (data.error || data.message)) || ("HTTP " + r.status));
+  return data;
+}
+
+/* ---------- formatting ---------- */
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const pct = (v) => (Math.round(v * 10) / 10).toFixed(v >= 10 ? 0 : 1) + "%";
+const usd = (v) => "$" + (v >= 100 ? Math.round(v).toLocaleString() : v >= 1 ? v.toFixed(2) : v.toFixed(3));
+function until(s) {
+  if (!s || s.startsWith("0001")) return "";
+  const m = Math.round((new Date(s) - Date.now()) / 60000);
+  if (m <= 0) return "now";
+  if (m >= 1440) return Math.floor(m / 1440) + "d " + Math.floor((m % 1440) / 60) + "h";
+  if (m >= 60) return Math.floor(m / 60) + "h " + String(m % 60).padStart(2, "0") + "m";
+  return m + "m";
+}
+function windowLabel(id) {
+  if (id === "*") return "All other windows";
+  const [len, scope] = id.split(":");
+  const L = { "5h": "5-hour", "7d": "Weekly", "1d": "Daily", "30d": "Monthly" }[len] || len;
+  return scope ? L + " · " + scope.charAt(0).toUpperCase() + scope.slice(1).replace(/_/g, " ") : L;
+}
+const mask = (k) => k.length > 14 ? k.slice(0, 7) + "…" + k.slice(-4) : k;
+const trusted = (q) => q === "calibrated" || q === "ratio";
+const qualityLabel = { calibrated: "calibrated", ratio: "derived", bootstrap: "estimating", calibrating: "calibrating" };
+function tone(used, limit) { if (limit == null) return "n"; const r = limit > 0 ? used / limit : 1; return r >= 1 ? "r" : r >= 0.75 ? "y" : "g"; }
+function meter(name, used, limit, known, i, noteRight) {
+  const shown = known === false ? '<span class="lim" title="Enforced once the pool\'s capacity is calibrated from traffic">calibrating</span>' : pct(used);
+  return `<div class="meter-row"><div class="meter-label"><span class="name">${esc(name)}</span>
+    <span class="val">${shown}${limit != null ? ` <span class="lim">/ ${limit}%</span>` : ""}${noteRight ? ` <span class="lim">${noteRight}</span>` : ""}</span></div>
+    <div class="bar"><span class="fill ${known === false ? "n" : tone(used, limit)}" style="width:${known === false ? 0 : Math.max(0, Math.min(100, used))}%;--i:${i}"></span>
+    ${limit != null ? `<span class="tick" style="left:${Math.min(100, limit)}%"></span>` : ""}</div></div>`;
+}
+
+/* ---------- state ---------- */
+let status = null, cfg = null, loadErr = "";
+async function load(quiet) {
+  try {
+    [status, cfg] = await Promise.all([api("GET", STATUS), api("GET", PLUGIN_CFG)]);
+    cfg = cfg || {}; cfg.keys = cfg.keys || []; loadErr = "";
+    setTimeout(() => document.body.classList.remove("first"), 1500);
+  } catch (e) { loadErr = e.message; if (!quiet) toast(e.message, true); }
+  render();
+}
+
+/* ---------- rendering ---------- */
+function render() {
+  const app = document.getElementById("app");
+  if (!status) {
+    app.innerHTML = header("") + (loadErr ? `<div class="error-box">${esc(loadErr)}</div>` : "");
+    return;
+  }
+  const keys = cfg.keys || [];
+  const ks = Object.fromEntries((status.keys || []).map((k) => [k.name, k]));
+  const blocked = keys.filter((k) => isBlocked(ks[k.name])).length;
+  const meta = [`${keys.length} key${keys.length === 1 ? "" : "s"}`, `${status.accounts.length} account${status.accounts.length === 1 ? "" : "s"}`]
+    .concat(blocked ? [`<span class="bad">${blocked} blocked</span>`] : [])
+    .concat([`updated ${new Date(status.now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`]);
+  app.innerHTML = header(meta.join(' <span class="dot">·</span> ')) +
+    (loadErr ? `<div class="error-box">${esc(loadErr)}</div>` : "") +
+    `<section class="section"><div class="section-head"><h2 class="section-title">Keys</h2>
+       <span class="hint">Own share: the key's estimated usage of the whole pool's window. Pool ceiling: the key stops once all accounts together reach it.</span></div>
+       ${keys.length ? `<div class="grid">${keys.map((k, i) => keyCard(k, ks[k.name], i)).join("")}</div>` :
+       `<div class="empty"><div class="empty-title">No budgeted keys yet</div>
+         <div class="empty-desc">Create one key per machine or CLI and give it a share of each limit window. Keys not listed here (like the admin key) are never limited.</div>
+         <button class="btn btn-primary" data-act="add">${ICON.plus}Add key</button></div>`}</section>` +
+    `<section class="section"><div class="section-head"><h2 class="section-title">Pool</h2>
+       <span class="hint">Each subscription's limit windows, including usage outside the proxy. Capacity is the API-equivalent cost that fills a window, learned from traffic.</span></div>
+       <div class="grid">${status.accounts.map(accountCard).join("") || '<div class="muted">No accounts yet.</div>'}</div></section>`;
+}
+function header(meta) {
+  return `<div class="header"><div class="copy"><h1 class="title">Budgets</h1><p class="meta">${meta || "loading"}</p></div>
+    <div class="actions"><button class="btn btn-ghost btn-icon" title="Refresh" data-act="refresh">${ICON.refresh}</button>
+    <button class="btn btn-secondary" data-act="settings">${ICON.gear}Settings</button>
+    <button class="btn btn-primary" data-act="add">${ICON.plus}Add key</button></div></div>`;
+}
+function isBlocked(k) { return !!(k && (k.providers || []).some((p) => (p.windows || []).some((w) => w.blocked))); }
+function keyCard(k, st, idx) {
+  const blocked = isBlocked(st);
+  let soonest = "";
+  if (blocked) for (const p of st.providers) for (const w of p.windows) if (w.blocked) {
+    const t = w.own_share_frees_at || w.pool_frees_at; if (t && (!soonest || t < soonest)) soonest = t;
+  }
+  const budgets = k.budgets || {};
+  let groups = "", i = 0;
+  for (const provider of Object.keys(budgets).sort()) {
+    const b = budgets[provider] || {}; const own = b.own_share || {}, ceil = b.pool_ceiling || {};
+    const pst = st && (st.providers || []).find((p) => p.provider === provider);
+    const rows = ((pst && pst.windows) || []).filter((w) => w.own_share_limit != null || w.pool_ceiling != null);
+    groups += `<div class="group"><div class="group-title">${esc(PROVIDERS[provider] || provider)}</div>` +
+      (rows.length ? rows.map((w) => {
+        const free = w.blocked ? until(w.own_share_frees_at || w.pool_frees_at) : "";
+        return `<div class="window"><div class="window-head"><span>${esc(windowLabel(w.window))}</span>
+          ${w.blocked ? `<span class="badge bad"><span class="pip"></span>blocked${free ? " · " + free : ""}</span>` : ""}</div>` +
+          (w.own_share_limit != null ? meter("Own share", w.own_share_pct, w.own_share_limit, w.own_share_known, i++) : "") +
+          (w.pool_ceiling != null ? meter("Pool", w.pool_util_pct, w.pool_ceiling, true, i++) : "") +
+          `<div class="window-foot"><span>${usd(w.own_cost_usd)} used this window</span>${free ? `<span>frees in ${free}</span>` : ""}</div></div>`;
+      }).join("") : `<div class="muted">${Object.keys(own).length + Object.keys(ceil).length ? "No matching windows in the pool yet." : "No limits."}</div>`) + `</div>`;
+  }
+  if (!groups) groups = `<div class="muted">No limits — this key is tracked but never blocked.</div>`;
+  return `<div class="card${blocked ? " blocked" : ""}"><div class="card-head"><div><div class="card-title">${esc(k.name)}</div>
+      <div class="card-sub"><span class="chip-key">${esc(mask(k.key))}</span>
+      ${blocked ? `<span class="badge bad"><span class="pip"></span>Blocked${soonest ? " · frees in " + until(soonest) : ""}</span>` : `<span class="badge ok"><span class="pip"></span>Within budget</span>`}</div></div>
+      <div class="card-tools"><button class="btn btn-ghost btn-icon" title="Connect a client" data-act="connect" data-i="${idx}">${ICON.plug}</button>
+      <button class="btn btn-ghost btn-icon" title="Edit" data-act="edit" data-i="${idx}">${ICON.edit}</button>
+      <button class="btn btn-ghost btn-icon" title="Delete" data-act="delete" data-i="${idx}">${ICON.trash}</button></div></div>${groups}</div>`;
+}
+function accountCard(a, idx) {
+  const rows = (a.windows || []).map((w, j) => {
+    const t = w.util_pct >= 90 ? "r" : w.util_pct >= 70 ? "y" : "g";
+    const reset = until(w.resets_at);
+    return `<div class="meter-row"><div class="meter-label"><span class="name">${esc(windowLabel(w.window))}</span><span class="val">${pct(w.util_pct)}</span></div>
+      <div class="bar"><span class="fill ${t}" style="width:${Math.min(100, w.util_pct)}%;--i:${idx * 3 + j}"></span></div>
+      <div class="window-foot"><span>${reset ? "resets in " + reset : "idle"}</span>
+      <span title="API-equivalent cost that fills this window, learned from traffic">${trusted(w.calibration) && w.capacity_usd > 0
+        ? usd(w.capacity_usd) + " per 100%" : esc(qualityLabel[w.calibration] || w.calibration) + (w.segments ? " · " + w.segments + "/3" : "")}</span></div></div>`;
+  }).join("");
+  return `<div class="card"><div class="card-head"><div><div class="card-title">${esc(a.label || a.id)}</div>
+    <div class="card-sub"><span class="badge count">${esc(PROVIDERS[a.provider] || a.provider)}</span>${a.disabled ? '<span class="badge">disabled</span>' : ""}</div></div></div>
+    <div class="group">${rows || '<div class="muted">No windows observed yet.</div>'}</div></div>`;
+}
+
+/* ---------- modals ---------- */
+function modal(title, body, footer, opts = {}) {
+  const root = document.getElementById("modal-root");
+  root.innerHTML = `<div class="overlay"><div class="modal" role="dialog" aria-modal="true" style="${opts.width ? "width:min(" + opts.width + ",100%)" : ""}">
+    <div class="modal-header"><div class="modal-title">${esc(title)}</div><button class="close" data-close aria-label="Close">${ICON.x}</button></div>
+    <div class="modal-body">${body}</div>${footer ? `<div class="modal-footer">${footer}</div>` : ""}</div></div>`;
+  const ov = root.firstElementChild;
+  const close = () => { root.innerHTML = ""; document.removeEventListener("keydown", onKey); opts.onClose && opts.onClose(); };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
+  ov.addEventListener("mousedown", (e) => { if (e.target === ov) close(); });
+  ov.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", close));
+  const first = ov.querySelector("input"); if (first) setTimeout(() => first.focus(), 50);
+  return { el: ov, close };
+}
+function askKey() {
+  return new Promise((resolve) => {
+    let done = false;
+    const m = modal("Management key", `<div class="field"><label>Management key</label><input class="input" type="password" id="mk" autocomplete="off">
+      <span class="hint">Needed when this page isn't opened through the protected domain. Kept for this browser session only.</span></div>`,
+      `<button class="btn btn-secondary" data-close>Cancel</button><button class="btn btn-primary" id="mk-ok">Continue</button>`,
+      { onClose: () => { if (!done) resolve(""); } });
+    const ok = () => { done = true; const v = m.el.querySelector("#mk").value.trim(); m.close(); resolve(v); };
+    m.el.querySelector("#mk-ok").addEventListener("click", ok);
+    m.el.querySelector("#mk").addEventListener("keydown", (e) => { if (e.key === "Enter") ok(); });
+  });
+}
+function genKey() {
+  const b = new Uint8Array(24); crypto.getRandomValues(b);
+  return "sk-cpa-" + Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+}
+function providerWindows() {
+  const out = {};
+  for (const p of Object.keys(PROVIDERS)) out[p] = [];
+  for (const w of status.windows || []) (out[w.provider] = out[w.provider] || []).push(w.window);
+  return out;
+}
+
+function editKey(idx) {
+  const isNew = idx == null;
+  const orig = isNew ? { name: "", key: genKey(), budgets: {} } : JSON.parse(JSON.stringify(cfg.keys[idx]));
+  const pw = providerWindows();
+  // Also show windows that are configured but not (yet) observed in the pool.
+  for (const [p, b] of Object.entries(orig.budgets || {})) {
+    pw[p] = pw[p] || [];
+    for (const m of [b.own_share || {}, b.pool_ceiling || {}]) for (const w of Object.keys(m)) if (w !== "*" && !pw[p].includes(w)) pw[p].push(w);
+  }
+  const provs = Object.keys(pw);
+  const table = (p) => {
+    const b = (orig.budgets || {})[p] || {}; const own = b.own_share || {}, ceil = b.pool_ceiling || {};
+    const rows = pw[p].concat(["*"]);
+    return `<table class="edit" data-p="${p}"><tr><th>Window</th><th>Own share</th><th>Pool ceiling</th></tr>` + rows.map((w) =>
+      `<tr><td>${esc(windowLabel(w))}${w === "*" ? '<div class="hint">fallback for windows without a value</div>' : ""}</td>
+        <td class="w"><div class="pct"><input class="input num" type="number" min="0" max="100" step="1" data-k="own" data-w="${esc(w)}" value="${own[w] ?? ""}" placeholder="–"></div></td>
+        <td class="w"><div class="pct"><input class="input num" type="number" min="0" max="100" step="1" data-k="ceil" data-w="${esc(w)}" value="${ceil[w] ?? ""}" placeholder="–"></div></td></tr>`).join("") + `</table>`;
+  };
+  const body = `<div class="field"><label for="kn">Name</label><input class="input" id="kn" value="${esc(orig.name)}" placeholder="laptop, ci-runner, …">
+      <span class="hint">One key per machine or CLI.</span></div>
+    <div class="field"><label>API key</label><div class="keyline"><input class="input" id="kk" value="${esc(orig.key)}" spellcheck="false">
+      <button class="btn btn-secondary btn-sm" id="kcopy" type="button">${ICON.copy}Copy</button><button class="btn btn-secondary btn-sm" id="kgen" type="button">New</button></div>
+      <span class="hint">Added to the proxy's client keys on save. Leave a limit empty for no limit.</span></div>
+    <div class="tabs">${provs.map((p, i) => `<button class="tab${i ? "" : " on"}" data-tab="${p}" type="button">${esc(PROVIDERS[p] || p)}</button>`).join("")}</div>
+    ${provs.map((p, i) => `<div data-pane="${p}"${i ? ' hidden' : ""}>${table(p)}</div>`).join("")}
+    <div class="err-text" id="kerr"></div>`;
+  const m = modal(isNew ? "Add key" : "Edit " + orig.name, body,
+    `<button class="btn btn-secondary" data-close>Cancel</button><button class="btn btn-primary" id="ksave">${isNew ? "Create key" : "Save"}</button>`);
+  const $ = (s) => m.el.querySelector(s);
+  m.el.querySelectorAll("[data-tab]").forEach((t) => t.addEventListener("click", () => {
+    m.el.querySelectorAll("[data-tab]").forEach((x) => x.classList.toggle("on", x === t));
+    m.el.querySelectorAll("[data-pane]").forEach((x) => (x.hidden = x.dataset.pane !== t.dataset.tab));
+  }));
+  $("#kgen").addEventListener("click", () => { $("#kk").value = genKey(); });
+  $("#kcopy").addEventListener("click", () => copy($("#kk").value));
+  $("#ksave").addEventListener("click", async () => {
+    const name = $("#kn").value.trim(), key = $("#kk").value.trim(), err = $("#kerr");
+    if (!name) return (err.textContent = "Give the key a name.");
+    if (key.length < 16) return (err.textContent = "The API key must be at least 16 characters.");
+    if (cfg.keys.some((k, i) => i !== idx && k.name === name)) return (err.textContent = "Another key already has this name.");
+    if (cfg.keys.some((k, i) => i !== idx && k.key === key)) return (err.textContent = "Another key already uses this API key.");
+    const budgets = {};
+    let bad = "";
+    m.el.querySelectorAll("table.edit").forEach((tb) => {
+      const own = {}, ceil = {};
+      tb.querySelectorAll("input").forEach((inp) => {
+        if (inp.value === "") return;
+        const v = Number(inp.value);
+        if (!(v >= 0 && v <= 100)) { bad = "Limits must be between 0 and 100."; return; }
+        (inp.dataset.k === "own" ? own : ceil)[inp.dataset.w] = v;
+      });
+      if (Object.keys(own).length || Object.keys(ceil).length) {
+        budgets[tb.dataset.p] = {};
+        if (Object.keys(own).length) budgets[tb.dataset.p].own_share = own;
+        if (Object.keys(ceil).length) budgets[tb.dataset.p].pool_ceiling = ceil;
+      }
+    });
+    if (bad) return (err.textContent = bad);
+    const entry = { name, key, budgets };
+    const keys = cfg.keys.slice();
+    if (isNew) keys.push(entry); else keys[idx] = entry;
+    const btn = $("#ksave"); btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Saving';
+    try {
+      await saveKeys(keys, isNew ? [key] : key !== orig.key ? [key] : [], !isNew && key !== orig.key ? [orig.key] : []);
+      m.close(); toast(isNew ? `Created ${name}` : `Saved ${name}`);
+      if (isNew) connect(keys.length - 1);
+    } catch (e) { err.textContent = e.message; btn.disabled = false; btn.textContent = isNew ? "Create key" : "Save"; }
+  });
+}
+
+async function saveKeys(keys, addApiKeys, removeApiKeys) {
+  if (addApiKeys.length) {
+    const ak = (await api("GET", API_KEYS)) || [];
+    const next = ak.concat(addApiKeys.filter((k) => !ak.includes(k)));
+    if (next.length !== ak.length) await api("PUT", API_KEYS, next);
+  }
+  const current = (await api("GET", PLUGIN_CFG)) || {};
+  current.keys = keys;
+  await api("PUT", PLUGIN_CFG, current);
+  if (removeApiKeys.length) {
+    const ak = (await api("GET", API_KEYS)) || [];
+    const next = ak.filter((k) => !removeApiKeys.includes(k));
+    if (next.length !== ak.length) await api("PUT", API_KEYS, next);
+  }
+  await new Promise((r) => setTimeout(r, 700)); // let the plugin pick up the new config
+  await load(true);
+}
+
+function deleteKey(idx) {
+  const k = cfg.keys[idx];
+  const m = modal("Delete " + k.name, `<p>This removes the key from the budgets <b>and</b> from the proxy's client keys, so any machine using it stops working.</p>`,
+    `<button class="btn btn-secondary" data-close>Cancel</button><button class="btn btn-danger" id="del">Delete key</button>`, { width: "460px" });
+  m.el.querySelector("#del").addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try { await saveKeys(cfg.keys.filter((_, i) => i !== idx), [], [k.key]); m.close(); toast("Deleted " + k.name); }
+    catch (err) { toast(err.message, true); e.target.disabled = false; }
+  });
+}
+
+function connect(idx) {
+  const k = cfg.keys[idx], base = location.origin;
+  const snip = (s) => `<pre class="snippet"><button class="btn btn-secondary btn-sm" data-copy="${esc(s)}">${ICON.copy}Copy</button>${esc(s)}</pre>`;
+  const claude = `export ANTHROPIC_BASE_URL=${base}\nexport ANTHROPIC_AUTH_TOKEN=${k.key}`;
+  const claudeJson = JSON.stringify({ env: { ANTHROPIC_BASE_URL: base, ANTHROPIC_AUTH_TOKEN: k.key } }, null, 2);
+  const codex = `# ~/.codex/config.toml\nmodel_provider = "cpa"\n\n[model_providers.cpa]\nname = "CLIProxyAPI"\nbase_url = "${base}/v1"\nenv_key = "CPA_API_KEY"\nwire_api = "responses"`;
+  const m = modal("Connect " + k.name,
+    `<div class="hint" style="margin-bottom:12px">Use this key only on <b>${esc(k.name)}</b> so its usage is counted against its budget.</div>
+     <label><b>Claude Code</b> — shell</label>${snip(claude)}
+     <details><summary>or ~/.claude/settings.json</summary>${snip(claudeJson)}</details>
+     <label><b>Codex CLI</b></label>${snip(codex)}${snip("export CPA_API_KEY=" + k.key)}
+     <label><b>Any OpenAI-compatible client</b></label>${snip(`base URL: ${base}/v1\nAPI key:  ${k.key}`)}`,
+    `<button class="btn btn-primary" data-close>Done</button>`);
+  m.el.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", () => copy(b.dataset.copy)));
+}
+
+function settings() {
+  const pricing = (cfg.pricing || []).map((r) => ({ ...r }));
+  const prow = (r, i) => `<tr data-i="${i}">
+    <td><select class="input" data-f="provider">${["", "claude", "codex"].map((p) => `<option value="${p}"${(r.provider || "") === p ? " selected" : ""}>${p ? PROVIDERS[p] : "Any"}</option>`).join("")}</select></td>
+    <td><input class="input" data-f="match" value="${esc(r.match || "")}" placeholder="any model"></td>
+    ${["input", "output", "cache_read", "cache_write"].map((f) => `<td class="w" style="width:92px"><input class="input num" type="number" min="0" step="any" data-f="${f}" value="${r[f] ?? ""}"></td>`).join("")}
+    <td><button class="btn btn-ghost btn-icon" data-rm="${i}" title="Remove">${ICON.trash}</button></td></tr>`;
+  const body = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">
+      <div class="field"><label for="pi">Usage polling</label><input class="input" id="pi" value="${esc(cfg.poll_interval || "3m")}">
+        <span class="hint">How often each account's limits are fetched, e.g. 3m.</span></div>
+      <div class="field"><label for="cs">Calibration step</label><div class="pct"><input class="input num" id="cs" type="number" min="1" max="20" step="1" value="${cfg.calibration_step ?? 3}"></div>
+        <span class="hint">Usage rise that closes a calibration sample.</span></div></div>
+    <div class="field"><label>Price weights <span class="muted">(USD per 1M tokens)</span></label>
+      <span class="hint">Only ratios matter — they decide how much a request counts relative to others (Opus vs Haiku, output vs cache reads). Rules here are checked before the built-in API prices; first match wins.</span></div>
+    <table class="edit" id="pt"><tr><th>Provider</th><th>Model contains</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th></th></tr>${pricing.map(prow).join("")}</table>
+    <button class="btn btn-ghost btn-sm" id="padd" style="margin-top:8px">${ICON.plus}Add rule</button>
+    <details style="margin-top:12px"><summary>Built-in weights (API list prices)</summary>
+      <table class="edit"><tr><th>Provider</th><th>Model contains</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th></tr>
+      ${(status.pricing_defaults || []).map((r) => `<tr><td>${esc(PROVIDERS[r.provider] || r.provider || "Any")}</td><td class="mono">${esc(r.match || "any")}</td>
+        ${[r.input, r.output, r.cache_read, r.cache_write].map((v) => `<td class="num">${v ? "$" + v : "–"}</td>`).join("")}</tr>`).join("")}</table></details>
+    <div class="err-text" id="serr" style="margin-top:8px"></div>`;
+  const m = modal("Settings", body, `<button class="btn btn-secondary" data-close>Cancel</button><button class="btn btn-primary" id="ssave">Save</button>`, { width: "820px" });
+  const $ = (s) => m.el.querySelector(s);
+  const collect = () => Array.from(m.el.querySelectorAll("#pt tr[data-i]")).map((tr) => {
+    const r = {};
+    tr.querySelectorAll("[data-f]").forEach((inp) => {
+      const f = inp.dataset.f;
+      if (f === "provider" || f === "match") { if (inp.value.trim()) r[f] = inp.value.trim().toLowerCase(); }
+      else if (inp.value !== "") r[f] = Number(inp.value);
+    });
+    return r;
+  });
+  const redraw = (rows) => {
+    $("#pt").innerHTML = `<tr><th>Provider</th><th>Model contains</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th></th></tr>` + rows.map(prow).join("");
+    m.el.querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", () => { const r = collect(); r.splice(+b.dataset.rm, 1); redraw(r); }));
+  };
+  redraw(pricing);
+  $("#padd").addEventListener("click", () => redraw(collect().concat([{}])));
+  $("#ssave").addEventListener("click", async () => {
+    const pi = $("#pi").value.trim(), cs = Number($("#cs").value);
+    if (!/^\d+(\.\d+)?(s|m|h)$/.test(pi)) return ($("#serr").textContent = "Polling interval looks like 3m, 90s or 1h.");
+    if (!(cs >= 1 && cs <= 20)) return ($("#serr").textContent = "Calibration step must be between 1 and 20.");
+    const rules = collect().filter((r) => Object.keys(r).length);
+    if (rules.some((r) => r.input == null || r.output == null)) return ($("#serr").textContent = "Each price rule needs at least input and output prices.");
+    const btn = $("#ssave"); btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Saving';
+    try {
+      const current = (await api("GET", PLUGIN_CFG)) || {};
+      current.poll_interval = pi; current.calibration_step = cs;
+      if (rules.length) current.pricing = rules; else delete current.pricing;
+      await api("PUT", PLUGIN_CFG, current);
+      await new Promise((r) => setTimeout(r, 700)); await load(true);
+      m.close(); toast("Settings saved");
+    } catch (e) { $("#serr").textContent = e.message; btn.disabled = false; btn.textContent = "Save"; }
+  });
+}
+
+/* ---------- misc ---------- */
+function toast(msg, bad) {
+  const t = document.createElement("div"); t.className = "toast" + (bad ? " bad" : ""); t.textContent = msg;
+  document.getElementById("toasts").appendChild(t); setTimeout(() => t.remove(), bad ? 6000 : 2800);
+}
+async function copy(text) {
+  try { await navigator.clipboard.writeText(text); toast("Copied"); }
+  catch (e) { const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); toast("Copied"); }
+}
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-act]"); if (!b) return;
+  const i = b.dataset.i == null ? null : +b.dataset.i;
+  ({ add: () => editKey(null), edit: () => editKey(i), delete: () => deleteKey(i), connect: () => connect(i), settings, refresh: () => load() })[b.dataset.act]();
+});
+load();
+setInterval(() => { if (!document.getElementById("modal-root").firstChild && !document.hidden) load(true); }, 30000);
+</script>
+</body>
+</html>

@@ -1,0 +1,125 @@
+# budget-guard
+
+Per-client-key budgets for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), expressed as
+**percentages of your subscription pool's limit windows**.
+
+If several machines or CLIs share a pool of subscriptions behind CLIProxyAPI, budget-guard lets you
+give each one its own API key and cap it, for example *"the laptop may use 30% of the pool's 5-hour
+window and 20% of the weekly one; CI only runs while the pool is under 70%"*. It covers every window
+the providers report:
+
+- **Claude** (Claude Code OAuth accounts): 5-hour, weekly, and per-model weekly limits (e.g. `7d:fable`)
+- **Codex** (ChatGPT OAuth accounts): 5-hour, weekly, and additional per-model limits
+
+It ships as a native CLIProxyAPI plugin with a web page in the management panel (menu **Budgets**)
+where keys, budgets and settings are configured.
+
+## Two kinds of limit
+
+- **own_share**: the key's own usage, as a % of the *whole pool's* window (all accounts of that
+  provider, weighted by plan size). This is an estimate, see below.
+- **pool_ceiling**: stop serving the key once the pool's *total* usage reaches the %. This is exact:
+  it uses the providers' own utilization numbers, including usage outside the proxy.
+
+A key over budget gets HTTP 429 in its client's own protocol (Anthropic, OpenAI or Gemini error
+shape) with a readable message and `Retry-After` set to when the blocking window frees up. Nothing
+is sent upstream. Keys without a budget (e.g. your admin key) are never limited.
+
+## How own share is estimated
+
+Subscriptions report usage per account, not per request. budget-guard therefore weights each
+request's tokens by API list price (only the ratios matter: Opus vs Haiku, output vs cache reads).
+It then learns, per account and window, the *capacity*: the API-equivalent cost that fills 100%.
+
+Readings come from the rate-limit headers of every response and from polling each account's usage
+endpoint. A calibration segment runs between two "edges" (readings where the whole-number
+percentage just rose). Each segment gives `capacity ≥ 100 · proxy_cost / Δutilization`, because usage
+outside the proxy can only make the rise bigger. The estimate is the highest of these bounds after
+skipping the top fifth. In simulations with 16–33% of usage outside the proxy it lands within ±10%
+of the true capacity. Longer windows can also be derived from a calibrated 5-hour window, because
+both rise together.
+
+Own share is only **enforced** once capacity is calibrated (3 or more segments). Until then the page
+shows "calibrating" and only pool ceilings apply.
+
+## Install
+
+Requires CLIProxyAPI v8 with plugin support. It was built against v8.0.48, plugin C ABI v1, RPC
+schema v9.
+
+```sh
+git clone https://github.com/rodrigohpalmeirim/cpa-budget-guard && cd cpa-budget-guard
+./build.sh /path/to/cliproxyapi/plugins/linux/amd64   # tests, builds in Docker, installs
+```
+
+`build.sh` builds `dist/budget-guard.so` inside `golang:1.26-bookworm`, which matches the official
+`eceasy/cli-proxy-api` image (Debian bookworm, glibc, linux/amd64). For another platform, build with
+`CGO_ENABLED=1 go build -buildmode=c-shared -o budget-guard.so .` on a matching system.
+
+Enable plugins in CLIProxyAPI's `config.yaml` and restart:
+
+```yaml
+plugins:
+  enabled: true
+  dir: "plugins"
+  configs:
+    budget-guard:
+      enabled: true
+      priority: 100
+      state_file: "/CLIProxyAPI/plugins/budget-guard-state.json"  # calibration + accounting
+```
+
+Then open the management panel → **Budgets**, and add a key per machine. The page writes through
+CLIProxyAPI's v8 management API (`/v8/management/config/plugins/configs/budget-guard` and
+`/v8/management/config/access/api-keys`) and the plugin reloads automatically. Its **Connect** dialog
+gives ready-to-paste settings for Claude Code, Codex CLI and OpenAI-compatible clients.
+
+### Configuring by hand
+
+```yaml
+    budget-guard:
+      # ...
+      poll_interval: 3m          # per-account usage endpoint polling
+      calibration_step: 3        # % rise that closes a calibration segment
+      keys:
+        - name: laptop
+          key: "sk-cpa-..."      # must also be listed in access.api-keys
+          budgets:
+            claude:
+              own_share:    {5h: 30, 7d: 20, "7d:fable": 10}
+              pool_ceiling: {"*": 90}   # "*" = every window without an explicit value
+            codex:
+              own_share: {"*": 50}
+      pricing:                   # optional weight overrides, first match wins (USD per 1M tokens)
+        - {provider: claude, match: opus, input: 5, output: 25, cache_read: 0.5, cache_write: 6.25}
+```
+
+## Status API
+
+- `GET /v0/management/budget-guard/status`: JSON with every key's standing per window, every account's
+  windows, and calibration state. Requires the management key.
+- `/v0/resource/plugins/budget-guard/status`: the web page. It's static HTML; CLIProxyAPI serves
+  plugin resources without authentication, so the page fetches all data from the endpoint above.
+
+## Layout
+
+| Path | Contents |
+| --- | --- |
+| `main.go` | C ABI glue and host callbacks |
+| `plugin.go` | RPC handlers: request interceptor, usage hook, management routes, usage poller |
+| `guard/` | Windows, calibration, pricing and enforcement: pure Go with unit tests |
+| `status.html` | The embedded web page; it uses the management panel's design tokens and follows its theme |
+| `e2e/ui_test.py` | Playwright test that drives the page against a live proxy |
+
+## Caveats
+
+- Own share is an estimate (typically within ±10% once calibrated) and needs some traffic through
+  the proxy before it is enforced.
+- The plugin interface changes between CLIProxyAPI versions. After upgrading, check
+  `docker logs <container> | grep budget-guard` and rebuild if the plugin failed to load.
+- Using subscription accounts through a proxy may be against your provider's terms. That's your
+  call; this plugin only limits usage.
+
+## License
+
+MIT
