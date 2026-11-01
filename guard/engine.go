@@ -88,6 +88,17 @@ func (e *Engine) Config() Config {
 	return e.cfg
 }
 
+// KeyName returns the name of the configured key with this raw value.
+func (e *Engine) KeyName(raw string) (string, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	k := e.byKey[strings.TrimSpace(raw)]
+	if k == nil || raw == "" {
+		return "", false
+	}
+	return k.Name, true
+}
+
 func (e *Engine) account(id, provider string) *Account {
 	a := e.accounts[id]
 	if a == nil {
@@ -523,8 +534,8 @@ type KeyStatus struct {
 }
 
 type KeyProviderStatus struct {
-	Provider string             `json:"provider"`
-	Windows  []KeyWindowStatus  `json:"windows"`
+	Provider string            `json:"provider"`
+	Windows  []KeyWindowStatus `json:"windows"`
 }
 
 type KeyWindowStatus struct {

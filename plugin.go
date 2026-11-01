@@ -104,8 +104,10 @@ type managementRoute struct {
 }
 
 type managementRequest struct {
-	Method string
-	Path   string
+	Method  string
+	Path    string
+	Headers http.Header
+	Body    []byte
 }
 
 type managementResponse struct {
@@ -137,8 +139,14 @@ func handleMethod(method string, req []byte) ([]byte, error) {
 		return okEnvelope(struct{}{})
 	case "management.register":
 		return okEnvelope(map[string]any{
-			"routes": []managementRoute{{Method: "GET", Path: "/budget-guard/status",
-				Description: "Per-key budget usage and per-account limit windows (JSON)."}},
+			"routes": []managementRoute{
+				{Method: "GET", Path: "/budget-guard/status",
+					Description: "Per-key budget usage and per-account limit windows (JSON)."},
+				{Method: "GET", Path: "/budget-guard/hub/auth-files",
+					Description: "Pool accounts for usage-limit clients such as T3 Code (client key in " + hubKeyHeader + ")."},
+				{Method: "POST", Path: "/budget-guard/hub/api-call",
+					Description: "Provider usage endpoints for usage-limit clients (client key in " + hubKeyHeader + ")."},
+			},
 			"resources": []managementRoute{{Path: "/status", Menu: "Budgets",
 				Description: "Per-key budget usage against the subscription pool's limits."}},
 		})
@@ -236,35 +244,98 @@ func interceptBefore(raw []byte) ([]byte, error) {
 		return okEnvelope(interceptResponse{})
 	}
 	now := time.Now()
+	logf("info", "budget-guard: rejected %s request: %s", model, d.Message(now))
+	status, h, body := rejection(req.SourceFormat, d, now)
+	return okEnvelope(interceptResponse{Terminate: true, StatusCode: status, ResponseHeaders: h, ResponseBody: body})
+}
+
+// rejection renders an over-budget response in the client's own protocol, carrying the reset time
+// in the form each client actually reads, so that agents (e.g. T3 Code) can resume on their own.
+func rejection(format string, d guard.Decision, now time.Time) (int, http.Header, []byte) {
 	msg := d.Message(now)
-	logf("info", "budget-guard: rejected %s request: %s", model, msg)
 	retry := int64(60)
-	if !d.RetryAfter.IsZero() {
+	known := !d.RetryAfter.IsZero() && d.RetryAfter.After(now)
+	if known {
 		retry = int64(d.RetryAfter.Sub(now).Seconds()) + 1
-		if retry < 1 {
-			retry = 1
-		}
 	}
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
 	h.Set("Retry-After", fmt.Sprint(retry))
-	return okEnvelope(interceptResponse{Terminate: true, StatusCode: http.StatusTooManyRequests,
-		ResponseHeaders: h, ResponseBody: errorBody(req.SourceFormat, msg)})
-}
-
-// errorBody renders a 429 in the client's own protocol so its error handling shows the message.
-func errorBody(format, msg string) []byte {
-	var v any
+	h.Set("X-Should-Retry", "false") // Anthropic and OpenAI SDKs otherwise retry 429s
 	switch strings.ToLower(format) {
 	case "claude":
-		v = map[string]any{"type": "error", "error": map[string]any{"type": "rate_limit_error", "message": msg}}
+		type apiError struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		}
+		inner, _ := json.Marshal(struct {
+			Type  string   `json:"type"`
+			Error apiError `json:"error"`
+		}{"error", apiError{"rate_limit_error", msg}})
+		if !known {
+			return http.StatusTooManyRequests, h, inner
+		}
+		// Claude Code ignores rate-limit headers unless it's logged in to a subscription, so a
+		// 429 can't tell it when the limit resets. The one form it passes on intact is an
+		// upstream-gateway error ("API Error: 503 [gw] [429]: {...} (reset after 1h2m3s)"),
+		// which T3 Code parses into a reset time.
+		h.Set("Content-Type", "text/plain; charset=utf-8")
+		return http.StatusServiceUnavailable, h,
+			[]byte(fmt.Sprintf("[budget-guard] [429]: %s (reset after %s)", inner, resetAfter(time.Duration(retry)*time.Second)))
 	case "gemini", "gemini-cli":
-		v = map[string]any{"error": map[string]any{"code": 429, "message": msg, "status": "RESOURCE_EXHAUSTED"}}
-	default:
-		v = map[string]any{"error": map[string]any{"message": msg, "type": "rate_limit_error", "code": "budget_exceeded"}}
+		raw, _ := json.Marshal(map[string]any{"error": map[string]any{"code": 429, "message": msg, "status": "RESOURCE_EXHAUSTED"}})
+		return http.StatusTooManyRequests, h, raw
 	}
-	raw, _ := json.Marshal(v)
-	return raw
+	e := map[string]any{"message": msg, "type": "rate_limit_error", "code": "budget_exceeded"}
+	if d.Provider == "codex" && known {
+		// Codex reads its own usage-limit error (with resets_at) and rate-limit headers. A window
+		// at 100% in the headers is what makes T3 Code schedule the resume.
+		e["type"] = "usage_limit_reached"
+		e["resets_at"] = d.RetryAfter.Unix()
+		e["resets_in_seconds"] = retry
+		slot := "secondary"
+		if strings.HasPrefix(d.Window, "5h") {
+			slot = "primary"
+		}
+		h.Set("X-Codex-"+slot+"-Used-Percent", "100")
+		h.Set("X-Codex-"+slot+"-Reset-At", fmt.Sprint(d.RetryAfter.Unix()))
+		h.Set("X-Codex-"+slot+"-Reset-After-Seconds", fmt.Sprint(retry))
+		if m := windowMinutes(d.Window); m > 0 {
+			h.Set("X-Codex-"+slot+"-Window-Minutes", fmt.Sprint(m))
+		}
+	}
+	raw, _ := json.Marshal(map[string]any{"error": e})
+	return http.StatusTooManyRequests, h, raw
+}
+
+// resetAfter formats a duration as "1h2m3s", leaving out zero leading units.
+func resetAfter(d time.Duration) string {
+	s := int64(d.Seconds())
+	out := ""
+	if s >= 3600 {
+		out += fmt.Sprintf("%dh", s/3600)
+	}
+	if s >= 60 {
+		out += fmt.Sprintf("%dm", s%3600/60)
+	}
+	return out + fmt.Sprintf("%ds", s%60)
+}
+
+// windowMinutes returns the length of a window ID such as "5h", "7d" or "7d:fable".
+func windowMinutes(id string) int {
+	id, _, _ = strings.Cut(id, ":")
+	var n int
+	var unit string
+	if _, err := fmt.Sscanf(id, "%d%s", &n, &unit); err != nil {
+		return 0
+	}
+	switch unit {
+	case "h":
+		return n * 60
+	case "d":
+		return n * 24 * 60
+	}
+	return 0
 }
 
 func handleUsage(raw []byte) {
@@ -291,6 +362,11 @@ func handleManagement(raw []byte) ([]byte, error) {
 	// Resource routes (/v0/resource/plugins/budget-guard/...) are public: only ever serve the static
 	// page there. Data is served only on the management route, which requires the management key.
 	path := strings.TrimRight(req.Path, "/")
+	if strings.HasPrefix(path, "/v0/management/") {
+		if _, endpoint, ok := strings.Cut(path, "/budget-guard/hub/"); ok {
+			return handleHub(req, endpoint)
+		}
+	}
 	if strings.HasPrefix(path, "/v0/management/") && strings.HasSuffix(path, "/budget-guard/status") {
 		body, err := json.MarshalIndent(engine.Snapshot(), "", " ")
 		if err != nil {
@@ -353,25 +429,69 @@ type authFile struct {
 	Unavailable bool   `json:"unavailable"`
 }
 
+func (f authFile) provider() string {
+	if f.Provider != "" {
+		return strings.ToLower(f.Provider)
+	}
+	return strings.ToLower(f.Type)
+}
+
+func listAuthFiles() ([]authFile, error) {
+	var list struct {
+		Files []authFile `json:"files"`
+	}
+	err := callHost("host.auth.list", map[string]any{}, &list)
+	return list.Files, err
+}
+
+type credential struct {
+	AccessToken      string `json:"access_token"`
+	AccountID        string `json:"account_id"`
+	ChatGPTAccountID string `json:"chatgpt_account_id"`
+}
+
+func (c credential) accountID() string {
+	if c.ChatGPTAccountID != "" {
+		return c.ChatGPTAccountID
+	}
+	return c.AccountID
+}
+
+func getCredential(authIndex string) (credential, error) {
+	var got struct {
+		JSON json.RawMessage `json:"json"`
+	}
+	var c credential
+	if err := callHost("host.auth.get", map[string]any{"auth_index": authIndex}, &got); err != nil {
+		return c, err
+	}
+	if err := json.Unmarshal(got.JSON, &c); err != nil || c.AccessToken == "" {
+		return c, fmt.Errorf("no access token in credential")
+	}
+	return c, nil
+}
+
+type hostHTTPRequest struct {
+	Method  string
+	URL     string
+	Headers http.Header
+	Body    []byte `json:",omitempty"`
+}
+
 type hostHTTPResponse struct {
 	StatusCode int
 	Body       []byte
 }
 
 func pollOnce() {
-	var list struct {
-		Files []authFile `json:"files"`
-	}
-	if err := callHost("host.auth.list", map[string]any{}, &list); err != nil {
+	files, err := listAuthFiles()
+	if err != nil {
 		logf("warn", "budget-guard: auth list: %v", err)
 		return
 	}
 	var infos []guard.AccountInfo
-	for _, f := range list.Files {
-		provider := strings.ToLower(f.Provider)
-		if provider == "" {
-			provider = strings.ToLower(f.Type)
-		}
+	for _, f := range files {
+		provider := f.provider()
 		label := f.Email
 		if label == "" {
 			label = f.Label
@@ -417,21 +537,11 @@ func pollOnce() {
 }
 
 func fetchUsage(in guard.AccountInfo) ([]guard.Observation, error) {
-	var got struct {
-		JSON json.RawMessage `json:"json"`
-	}
-	if err := callHost("host.auth.get", map[string]any{"auth_index": in.AuthIndex}, &got); err != nil {
+	cred, err := getCredential(in.AuthIndex)
+	if err != nil {
 		return nil, err
 	}
-	var cred struct {
-		AccessToken      string `json:"access_token"`
-		AccountID        string `json:"account_id"`
-		ChatGPTAccountID string `json:"chatgpt_account_id"`
-	}
-	if err := json.Unmarshal(got.JSON, &cred); err != nil || cred.AccessToken == "" {
-		return nil, fmt.Errorf("no access token in credential")
-	}
-	headers := map[string][]string{"Authorization": {"Bearer " + cred.AccessToken}, "Accept": {"application/json"}}
+	headers := http.Header{"Authorization": {"Bearer " + cred.AccessToken}, "Accept": {"application/json"}}
 	url := ""
 	switch in.Provider {
 	case "claude":
@@ -440,17 +550,13 @@ func fetchUsage(in guard.AccountInfo) ([]guard.Observation, error) {
 		headers["User-Agent"] = []string{"claude-cli/2.1.280 (external, cli)"}
 	case "codex":
 		url = "https://chatgpt.com/backend-api/wham/usage"
-		acct := cred.ChatGPTAccountID
-		if acct == "" {
-			acct = cred.AccountID
-		}
-		if acct != "" {
+		if acct := cred.accountID(); acct != "" {
 			headers["Chatgpt-Account-Id"] = []string{acct}
 		}
 		headers["User-Agent"] = []string{"codex-tui/0.149.1"}
 	}
 	var resp hostHTTPResponse
-	if err := callHost("host.http.do", map[string]any{"method": "GET", "url": url, "headers": headers}, &resp); err != nil {
+	if err := callHost("host.http.do", hostHTTPRequest{Method: "GET", URL: url, Headers: headers}, &resp); err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != 200 {

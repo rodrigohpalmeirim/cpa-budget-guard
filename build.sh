@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 mkdir -p .cache
 docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e GOCACHE=/src/.cache/go-build -e GOMODCACHE=/src/.cache/mod \
   -v "$PWD":/src -w /src golang:1.26-bookworm sh -c '
-    go mod tidy >/dev/null && go vet ./... && go test ./guard/ &&
+    go mod tidy >/dev/null && go vet ./... && go test ./... &&
     CGO_ENABLED=1 go build -trimpath -buildmode=c-shared -o dist/budget-guard.so . && rm -f dist/budget-guard.h'
 ls -l dist/budget-guard.so
 if [ -n "${1:-}" ]; then

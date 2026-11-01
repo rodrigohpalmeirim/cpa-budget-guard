@@ -21,9 +21,19 @@ where keys, budgets and settings are configured.
 - **pool_ceiling**: stop serving the key once the pool's *total* usage reaches the %. This is exact:
   it uses the providers' own utilization numbers, including usage outside the proxy.
 
-A key over budget gets HTTP 429 in its client's own protocol (Anthropic, OpenAI or Gemini error
+A key over budget gets an error in its client's own protocol (Anthropic, OpenAI or Gemini error
 shape) with a readable message and `Retry-After` set to when the blocking window frees up. Nothing
 is sent upstream. Keys without a budget (e.g. your admin key) are never limited.
+
+The reset time is also sent in the form each agent reads, so agents that pause on usage limits
+(such as T3 Code) can resume on their own:
+
+- **Claude Code** ignores rate-limit headers unless it's logged in to a subscription. Claude-format
+  requests therefore get a gateway-style `503` whose body reads
+  `[budget-guard] [429]: {...rate_limit_error...} (reset after 1h2m3s)`, with `X-Should-Retry: false`.
+  When the reset time is unknown it's a plain `429`.
+- **Codex** gets `429` with error type `usage_limit_reached` and `resets_at`, plus `x-codex-*`
+  rate-limit headers showing the blocking window at 100%.
 
 ## How own share is estimated
 
@@ -101,12 +111,42 @@ gives ready-to-paste settings for Claude Code, Codex CLI and OpenAI-compatible c
 - `/v0/resource/plugins/budget-guard/status`: the web page. It's static HTML; CLIProxyAPI serves
   plugin resources without authentication, so the page fetches all data from the endpoint above.
 
+## Usage limits in T3 Code
+
+T3 Code can show a CLIProxyAPI pool's limits (Settings → Providers → CLI Proxy → Add hub). It calls
+`GET /v0/management/auth-files` and `POST /v0/management/api-call`, which need the management key, and
+that key can read and change everything, including the accounts' tokens. budget-guard answers the
+same two calls for a budgeted client key instead:
+
+- `GET /v0/management/budget-guard/hub/auth-files`: the Claude and Codex accounts (id, auth_index,
+  provider, email, ChatGPT account ID).
+- `POST /v0/management/budget-guard/hub/api-call`: the provider usage endpoints only (Claude
+  `/api/oauth/usage`, Codex `/wham/usage` and rate-limit reset credits). Any other URL gets 403.
+
+These are management routes, so the request still needs the management key. Put a reverse proxy in
+front that injects it and passes the client's own `Authorization` header in `X-Budget-Guard-Key`, which
+the plugin checks against the budgeted keys. For nginx, place this before any other management
+location:
+
+```nginx
+location ~ ^/v0/management/(?<hub>auth-files|api-call)$ {
+  proxy_set_header Authorization "Bearer <management key>";
+  proxy_set_header X-Budget-Guard-Key $http_authorization;
+  proxy_pass http://cliproxyapi:8317/v0/management/budget-guard/hub/$hub;
+}
+```
+
+In T3, set the hub URL to the proxy's public address and enter the machine's client key in the
+**Management key** field. If the management panel is served from the same host, keep its own
+`auth-files` calls on the real endpoint, e.g. by routing on a session cookie.
+
 ## Layout
 
 | Path | Contents |
 | --- | --- |
 | `main.go` | C ABI glue and host callbacks |
 | `plugin.go` | RPC handlers: request interceptor, usage hook, management routes, usage poller |
+| `hub.go` | Usage-limit endpoints for T3 Code, authenticated by a client key |
 | `guard/` | Windows, calibration, pricing and enforcement: pure Go with unit tests |
 | `status.html` | The embedded web page; it uses the management panel's design tokens and follows its theme |
 | `e2e/ui_test.py` | Playwright test that drives the page against a live proxy |

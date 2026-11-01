@@ -13,8 +13,8 @@ var t0 = time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
 
 type clock struct{ t time.Time }
 
-func (c *clock) now() time.Time         { return c.t }
-func (c *clock) add(d time.Duration)    { c.t = c.t.Add(d) }
+func (c *clock) now() time.Time      { return c.t }
+func (c *clock) add(d time.Duration) { c.t = c.t.Add(d) }
 
 func near(t *testing.T, name string, got, want, tol float64) {
 	t.Helper()
@@ -113,14 +113,14 @@ func TestCost(t *testing.T) {
 // sim drives an engine with one Claude account whose true capacity is capUSD per 100% of 5h
 // (and 10x that for 7d), with optional external (non-proxy) usage.
 type sim struct {
-	e        *Engine
-	c        *clock
-	id       string
-	cap5h    float64
-	used     float64 // true total cost in the period (proxy + external)
-	reset5h  time.Time
-	reset7d  time.Time
-	base7d   float64
+	e       *Engine
+	c       *clock
+	id      string
+	cap5h   float64
+	used    float64 // true total cost in the period (proxy + external)
+	reset5h time.Time
+	reset7d time.Time
+	base7d  float64
 }
 
 func newSim(e *Engine, c *clock, id string, cap5h float64) *sim {

@@ -23,18 +23,18 @@ type Observation struct {
 
 // Window tracks one limit window of one account.
 type Window struct {
-	ID         string    `json:"id"`
-	Scope      string    `json:"scope,omitempty"`
+	ID    string `json:"id"`
+	Scope string `json:"scope,omitempty"`
 	// Models learned for header-scoped windows: requests for these models have hit this limit.
 	Models     map[string]bool `json:"models,omitempty"`
-	LengthSec  int64     `json:"length_sec,omitempty"`
-	Util       float64   `json:"util"`
-	ResetsAt   time.Time `json:"resets_at"`
-	ObservedAt time.Time `json:"observed_at"`
+	LengthSec  int64           `json:"length_sec,omitempty"`
+	Util       float64         `json:"util"`
+	ResetsAt   time.Time       `json:"resets_at"`
+	ObservedAt time.Time       `json:"observed_at"`
 
 	// Accounting for the current period (since the last reset).
 	PeriodStart time.Time          `json:"period_start"`
-	ProxyCost   float64            `json:"proxy_cost"`          // all proxy traffic counted in this window
+	ProxyCost   float64            `json:"proxy_cost"`         // all proxy traffic counted in this window
 	KeyCost     map[string]float64 `json:"key_cost,omitempty"` // budgeted keys only
 
 	// Calibration: cost that fills 100% of this window on this account.
@@ -147,9 +147,9 @@ func (w *Window) Observe(o Observation, now time.Time, step float64) {
 
 // Calibration quality levels.
 const (
-	QualityNone      = "calibrating"
-	QualityBootstrap = "bootstrap"
-	QualityRatio     = "ratio"
+	QualityNone       = "calibrating"
+	QualityBootstrap  = "bootstrap"
+	QualityRatio      = "ratio"
 	QualityCalibrated = "calibrated"
 )
 
