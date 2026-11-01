@@ -10,6 +10,15 @@ const (
 	maxSegments      = 40
 	resetTolerance   = 5 * time.Minute
 	ratioMinBaseRise = 5.0 // percentage points of the base window needed before trusting a cross-window ratio
+	// Headers stay the calibration source while one arrived this recently; otherwise polls take over.
+	headerFresh = 15 * time.Minute
+)
+
+// Observation sources. They can disagree by a point at the same moment (the usage endpoint runs
+// ahead of the response headers), so calibration never mixes them.
+const (
+	SourceHeader = "header"
+	SourcePoll   = "poll"
 )
 
 // Observation is one reading of a limit window on one account.
@@ -19,6 +28,13 @@ type Observation struct {
 	ResetsAt  time.Time // zero when the window is idle / not started
 	LengthSec int64
 	Scope     string // "" (all traffic), "model:<substr>" or "header:<limit id>"
+	Source    string // SourceHeader or SourcePoll
+}
+
+// Reading is the last utilization one source reported.
+type Reading struct {
+	Util float64   `json:"util"`
+	At   time.Time `json:"at"`
 }
 
 // Window tracks one limit window of one account.
@@ -37,9 +53,12 @@ type Window struct {
 	ProxyCost   float64            `json:"proxy_cost"`         // all proxy traffic counted in this window
 	KeyCost     map[string]float64 `json:"key_cost,omitempty"` // budgeted keys only
 
-	// Calibration: cost that fills 100% of this window on this account.
-	Anchor   *Anchor   `json:"anchor,omitempty"`
-	Segments []Segment `json:"segments,omitempty"`
+	// Calibration: cost that fills 100% of this window on this account. Edges are read from one
+	// source at a time (EdgeSource), comparing each reading with that source's previous one.
+	Anchor     *Anchor            `json:"anchor,omitempty"`
+	Segments   []Segment          `json:"segments,omitempty"`
+	EdgeSource string             `json:"edge_source,omitempty"`
+	Last       map[string]Reading `json:"last,omitempty"` // per source, current period
 }
 
 // Anchor is the start of the open calibration segment.
@@ -83,6 +102,7 @@ func (w *Window) newPeriod(now time.Time) {
 	w.ProxyCost = 0
 	w.KeyCost = nil
 	w.Anchor = nil
+	w.Last = nil
 }
 
 // AddCost books a request's cost in the current period.
@@ -109,15 +129,41 @@ func (w *Window) Observe(o Observation, now time.Time, step float64) {
 	if o.Scope != "" {
 		w.Scope = o.Scope
 	}
+	prev, seen := w.Last[o.Source]
+	samePeriod := !w.ResetsAt.IsZero() && !o.ResetsAt.IsZero() && !o.ResetsAt.After(w.ResetsAt.Add(resetTolerance))
+	if seen && samePeriod && o.Util+1.5 < prev.Util {
+		return // utilization can't fall within a period: a stray reading
+	}
 	reset := false
 	if !w.ResetsAt.IsZero() && !o.ResetsAt.IsZero() && o.ResetsAt.After(w.ResetsAt.Add(resetTolerance)) {
 		reset = true // a later period has begun
 	}
-	if !w.ObservedAt.IsZero() && o.Util+1.5 < w.Util {
-		reset = true // utilization fell: the window reset
+	if seen && o.ResetsAt.IsZero() && o.Util+1.5 < prev.Util {
+		reset = true // utilization fell and no reset time is given: the window reset
 	}
 	if reset {
 		w.newPeriod(now)
+		seen = false
+	}
+	// Pick the calibration source: headers (one per request) while they keep coming, else polls.
+	if w.EdgeSource != o.Source {
+		last, ok := w.Last[w.EdgeSource]
+		if w.EdgeSource == "" || o.Source == SourceHeader || !ok || now.Sub(last.At) > headerFresh {
+			w.EdgeSource = o.Source
+			w.Anchor = nil
+		}
+	}
+	if w.Last == nil {
+		w.Last = map[string]Reading{}
+	}
+	w.Last[o.Source] = Reading{Util: o.Util, At: now}
+	w.Util = o.Util
+	if !o.ResetsAt.IsZero() {
+		w.ResetsAt = o.ResetsAt
+	}
+	w.ObservedAt = now
+	if o.Source != w.EdgeSource {
+		return
 	}
 	// Calibrate only at edges: the first reading after the whole-percent value rose. The true
 	// utilization has just crossed the shown value there, so the rounding error of both ends is
@@ -125,7 +171,7 @@ func (w *Window) Observe(o Observation, now time.Time, step float64) {
 	if w.Anchor != nil && o.Util < w.Anchor.Util {
 		w.Anchor = nil
 	}
-	if edge := !reset && !w.ObservedAt.IsZero() && o.Util > w.Util; edge {
+	if edge := seen && o.Util > prev.Util; edge {
 		if w.Anchor == nil {
 			w.Anchor = &Anchor{Util: o.Util, Cost: w.ProxyCost, At: now}
 		} else if dU := o.Util - w.Anchor.Util; dU >= step {
@@ -138,11 +184,6 @@ func (w *Window) Observe(o Observation, now time.Time, step float64) {
 			w.Anchor = &Anchor{Util: o.Util, Cost: w.ProxyCost, At: now}
 		}
 	}
-	w.Util = o.Util
-	if !o.ResetsAt.IsZero() {
-		w.ResetsAt = o.ResetsAt
-	}
-	w.ObservedAt = now
 }
 
 // Calibration quality levels.

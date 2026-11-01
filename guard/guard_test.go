@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -296,5 +297,75 @@ func TestRoughEstimateNeverBlocks(t *testing.T) {
 	e.mu.Unlock()
 	if wu.OwnKnown {
 		t.Fatalf("own share reported as known before calibration: %+v", wu)
+	}
+}
+
+// poll applies a usage-endpoint reading. Live, the endpoint runs about a point ahead of the
+// headers (e.g. 70 vs 0.69 at the same moment); rounding instead of flooring reproduces that.
+func (s *sim) poll() {
+	s.e.ApplyObservations(s.id, "claude", []Observation{
+		{Window: "5h", Util: math.Round(100 * s.used / s.cap5h), ResetsAt: s.reset5h, LengthSec: 5 * 3600},
+		{Window: "7d", Util: math.Round(100 * (s.base7d/100 + s.used/(10*s.cap5h))), ResetsAt: s.reset7d, LengthSec: 7 * 86400},
+	})
+}
+
+func TestMixedSourcesDoNotBiasCalibration(t *testing.T) {
+	e, c := testEngine(t, "keys: [{name: laptop, key: sk-laptop}]")
+	s := newSim(e, c, "acct-1", 200)
+	for i := 0; i < 180; i++ {
+		s.request("sk-laptop")
+		if i%3 == 0 {
+			s.poll()
+		}
+		c.add(time.Minute)
+	}
+	a := e.accounts["acct-1"]
+	cap5, q5 := a.Capacity("5h")
+	if q5 != QualityCalibrated {
+		t.Fatalf("5h quality %s", q5)
+	}
+	near(t, "5h capacity", cap5, 200, 20)
+	cap7, q7 := a.Capacity("7d")
+	if q7 == QualityNone {
+		t.Fatalf("7d quality %s", q7)
+	}
+	near(t, "7d capacity", cap7, 2000, 300)
+}
+
+func TestStrayLowReadingIsNotAReset(t *testing.T) {
+	e, c := testEngine(t, "keys: [{name: laptop, key: sk-laptop}]")
+	s := newSim(e, c, "acct-1", 200)
+	for i := 0; i < 30; i++ {
+		s.request("sk-laptop")
+		c.add(time.Minute)
+	}
+	w := e.accounts["acct-1"].Windows["5h"]
+	start, cost := w.PeriodStart, w.ProxyCost
+	// Another account's headers booked here by mistake: same reset time, much lower utilization.
+	e.HandleUsage(Usage{AuthID: "acct-1", Provider: "claude", Headers: http.Header{
+		"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.02"},
+		"Anthropic-Ratelimit-Unified-5h-Reset":       {fmt.Sprint(s.reset5h.Unix())},
+	}})
+	if !w.PeriodStart.Equal(start) || w.ProxyCost != cost || w.Util < 14 {
+		t.Fatalf("stray reading reset the window: start %v, cost %v, util %v", w.PeriodStart, w.ProxyCost, w.Util)
+	}
+}
+
+func TestOldCalibrationIsDiscarded(t *testing.T) {
+	path := t.TempDir() + "/state.json"
+	old := `{"version": 1, "accounts": {"acct-1": {"id": "acct-1", "provider": "claude",
+		"ratios": {"7d": {"base": "5h", "base_u": 100, "oth_u": 25}},
+		"windows": {"5h": {"id": "5h", "util": 40, "proxy_cost": 12.5,
+			"segments": [{"d_cost": 3, "d_util": 3}, {"d_cost": 3, "d_util": 3}, {"d_cost": 3, "d_util": 3}]}}}}}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := testEngine(t, "")
+	if err := e.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	a := e.accounts["acct-1"]
+	if w := a.Windows["5h"]; len(w.Segments) != 0 || a.Ratios != nil || w.ProxyCost != 12.5 {
+		t.Fatalf("segments %v, ratios %v, cost %v", w.Segments, a.Ratios, w.ProxyCost)
 	}
 }

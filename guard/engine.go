@@ -23,8 +23,8 @@ type Account struct {
 	Windows   map[string]*Window `json:"windows"`
 	// Ratios relate each unscoped window's capacity to the account's base (shortest) window,
 	// learned from how both utilizations rise together (valid even with usage outside the proxy).
-	Ratios   map[string]*Ratio `json:"ratios,omitempty"`
-	LastPair *Pair             `json:"last_pair,omitempty"`
+	Ratios    map[string]*Ratio `json:"ratios,omitempty"`
+	LastPairs map[string]*Pair  `json:"last_pairs,omitempty"` // per observation source
 }
 
 // Ratio accumulates simultaneous utilization rises of the base window and another window.
@@ -39,6 +39,10 @@ type Pair struct {
 	Util   map[string]float64   `json:"util"`
 	Resets map[string]time.Time `json:"resets"`
 }
+
+// stateVersion 2: calibration from before single-source edges (v0.3.0 and older) is discarded,
+// since mixing header and poll readings biased it low.
+const stateVersion = 2
 
 type persisted struct {
 	Version  int                 `json:"version"`
@@ -169,21 +173,22 @@ func (e *Engine) providerForModelLocked(model string) string {
 	return ""
 }
 
-// ApplyObservations records readings for an account (from polling or headers).
+// ApplyObservations records readings polled from an account's usage endpoint.
 func (e *Engine) ApplyObservations(accountID, provider string, obs []Observation) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.applyLocked(e.account(accountID, provider), obs, e.now())
+	e.applyLocked(e.account(accountID, provider), obs, SourcePoll, e.now())
 }
 
-func (e *Engine) applyLocked(a *Account, obs []Observation, now time.Time) {
+func (e *Engine) applyLocked(a *Account, obs []Observation, source string, now time.Time) {
 	if len(obs) == 0 {
 		return
 	}
-	for _, o := range obs {
-		a.window(o).Observe(o, now, e.cfg.CalibrationStep)
+	for i := range obs {
+		obs[i].Source = source
+		a.window(obs[i]).Observe(obs[i], now, e.cfg.CalibrationStep)
 	}
-	e.updateRatiosLocked(a, obs)
+	e.updateRatiosLocked(a, obs, source)
 	e.dirty = true
 }
 
@@ -198,7 +203,8 @@ func (a *Account) baseWindow() string {
 	return best
 }
 
-func (e *Engine) updateRatiosLocked(a *Account, obs []Observation) {
+// updateRatiosLocked compares a reading with the previous one from the same source only.
+func (e *Engine) updateRatiosLocked(a *Account, obs []Observation, source string) {
 	base := a.baseWindow()
 	cur := &Pair{Util: map[string]float64{}, Resets: map[string]time.Time{}}
 	for _, o := range obs {
@@ -210,7 +216,7 @@ func (e *Engine) updateRatiosLocked(a *Account, obs []Observation) {
 	if _, ok := cur.Util[base]; !ok || len(cur.Util) < 2 {
 		return
 	}
-	if prev := a.LastPair; prev != nil {
+	if prev := a.LastPairs[source]; prev != nil {
 		samePeriod := func(id string) bool {
 			p, ok := prev.Resets[id]
 			return ok && math.Abs(p.Sub(cur.Resets[id]).Seconds()) < resetTolerance.Seconds()
@@ -238,7 +244,10 @@ func (e *Engine) updateRatiosLocked(a *Account, obs []Observation) {
 			}
 		}
 	}
-	a.LastPair = cur
+	if a.LastPairs == nil {
+		a.LastPairs = map[string]*Pair{}
+	}
+	a.LastPairs[source] = cur
 }
 
 // Capacity returns the estimated cost that fills 100% of window id on account a.
@@ -287,7 +296,7 @@ func (e *Engine) HandleUsage(u Usage) {
 	// Rate-limit headers arrive before the body, so they reflect usage *before* this request:
 	// apply them first, then book the request's cost.
 	obs, limits := ParseHeaders(a.Provider, u.Headers, now)
-	e.applyLocked(a, obs, now)
+	e.applyLocked(a, obs, SourceHeader, now)
 	keyName := ""
 	if k := e.byKey[strings.TrimSpace(u.APIKey)]; k != nil {
 		keyName = k.Name
@@ -648,6 +657,12 @@ func (e *Engine) Load(path string) error {
 			if a.Windows == nil {
 				a.Windows = map[string]*Window{}
 			}
+			if p.Version < stateVersion {
+				a.Ratios = nil
+				for _, w := range a.Windows {
+					w.Anchor, w.Segments = nil, nil
+				}
+			}
 		}
 		e.accounts = p.Accounts
 	}
@@ -661,7 +676,7 @@ func (e *Engine) Save(path string) error {
 		e.mu.Unlock()
 		return nil
 	}
-	raw, err := json.MarshalIndent(persisted{Version: 1, SavedAt: e.now(), Accounts: e.accounts}, "", " ")
+	raw, err := json.MarshalIndent(persisted{Version: stateVersion, SavedAt: e.now(), Accounts: e.accounts}, "", " ")
 	e.dirty = false
 	e.mu.Unlock()
 	if err != nil {
