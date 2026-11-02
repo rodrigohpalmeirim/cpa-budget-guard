@@ -168,6 +168,16 @@ table.edit { width:100%; border-collapse:collapse; }
 table.edit th { text-align:left; font-size:12px; font-weight:600; color:var(--text-tertiary); padding:6px 8px; border-bottom:1px solid var(--border-color); }
 table.edit td { padding:6px 8px; border-bottom:1px solid color-mix(in srgb,var(--border-color) 60%,transparent); vertical-align:middle; }
 table.edit td.w { width:130px; }
+.seg { display:inline-flex; border:1px solid var(--border-color); border-radius:8px; overflow:hidden; align-self:flex-start; }
+.seg button { border:0; background:var(--bg-secondary); color:var(--text-secondary); padding:5px 11px; font:inherit; font-size:13px; font-weight:600; cursor:pointer; }
+.seg button + button { border-left:1px solid var(--border-color); }
+.seg button.on { background:var(--bg-tertiary); color:var(--text-primary); }
+.usage { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,520px),1fr)); gap:14px; }
+table.stats { width:100%; border-collapse:collapse; font-size:13px; }
+table.stats th { text-align:right; font-size:12px; font-weight:600; color:var(--text-tertiary); padding:5px 8px; border-bottom:1px solid var(--border-color); white-space:nowrap; }
+table.stats td { text-align:right; padding:5px 8px; border-bottom:1px solid color-mix(in srgb,var(--border-color) 60%,transparent); font-family:var(--mono); font-variant-numeric:tabular-nums; white-space:nowrap; }
+table.stats th:first-child, table.stats td:first-child { text-align:left; font-family:var(--font); overflow:hidden; text-overflow:ellipsis; max-width:220px; }
+table.stats td.warn { color:var(--quota-medium-color); } table.stats td.bad { color:var(--viz-failure); } table.stats td.good { color:var(--viz-success); }
 .pct { position:relative; } .pct::after { content:'%'; position:absolute; right:10px; top:50%; transform:translateY(-50%); color:var(--text-tertiary); pointer-events:none; }
 .pct .input { padding-right:26px; }
 .keyline { display:flex; gap:8px; } .keyline .input { font-family:var(--mono); font-size:13px; }
@@ -195,6 +205,7 @@ details summary { cursor:pointer; color:var(--text-secondary); font-weight:600; 
 "use strict";
 const STATUS = "/v0/management/budget-guard/status";
 const PLUGIN_CFG = "/v8/management/config/plugins/configs/budget-guard";
+const STATS = "/v0/management/budget-guard/stats";
 const API_KEYS = "/v8/management/config/access/api-keys";
 const PROVIDERS = { claude: "Claude", codex: "Codex" };
 const ICON = {
@@ -279,10 +290,11 @@ function meter(name, used, limit, known, i, noteRight) {
 }
 
 /* ---------- state ---------- */
-let status = null, cfg = null, loadErr = "";
+let status = null, cfg = null, loadErr = "", stats = null, statsErr = "", period = sessionStorage.getItem("budgetGuardPeriod") || "24h";
 async function load(quiet) {
   try {
     [status, cfg] = await Promise.all([api("GET", STATUS), api("GET", PLUGIN_CFG)]);
+    try { stats = await api("GET", STATS + "?period=" + period); statsErr = ""; } catch (e) { stats = null; statsErr = e.message; }
     cfg = cfg || {}; cfg.keys = cfg.keys || []; loadErr = "";
     setTimeout(() => document.body.classList.remove("first"), 1500);
   } catch (e) { loadErr = e.message; if (!quiet) toast(e.message, true); }
@@ -312,7 +324,40 @@ function render() {
          <button class="btn btn-primary" data-act="add">${ICON.plus}Add key</button></div>`}</section>` +
     `<section class="section"><div class="section-head"><h2 class="section-title">Pool</h2>
        <span class="hint">Each subscription's limit windows, including usage outside the proxy. Capacity is the API-equivalent cost that fills a window, learned from traffic.</span></div>
-       <div class="grid">${status.accounts.map(accountCard).join("") || '<div class="muted">No accounts yet.</div>'}</div></section>`;
+       <div class="grid">${status.accounts.map(accountCard).join("") || '<div class="muted">No accounts yet.</div>'}</div></section>` +
+    usageSection();
+}
+const PERIODS = ["1h", "5h", "24h", "7d", "30d"];
+const tok = (n) => n >= 1e9 ? (n / 1e9).toFixed(2) + "B" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n);
+function usageSection() {
+  const seg = `<div class="seg">${PERIODS.map((p) => `<button data-act="period" data-p="${p}" class="${p === period ? "on" : ""}">${p}</button>`).join("")}</div>`;
+  const head = `<section class="section"><div class="section-head"><h2 class="section-title">Usage</h2>
+    <span class="hint">Every request through the proxy, from budget-guard's request log. Cost is API-equivalent. Cache hit: share of prompt tokens read from cache; a low hit rate with a high write share means conversations are hopping between accounts.</span></div>${seg}`;
+  if (statsErr) return head + `<div class="error-box">${esc(statsErr)}</div></section>`;
+  if (!stats) return head + `<div class="muted">loading</div></section>`;
+  if (!stats.total.requests) return head + `<div class="muted">No requests logged in this period yet.</div></section>`;
+  const labels = Object.fromEntries((status.accounts || []).map((a) => [a.id, a.label || a.id]));
+  const hitTone = (g) => g.cache_read + g.cache_write + g.cached === 0 ? "" : g.cache_hit >= 0.85 ? "good" : g.cache_hit >= 0.6 ? "warn" : "bad";
+  const rows = (groups, name) => groups.map((g) => `<tr><td title="${esc(name(g))}">${esc(name(g))}</td><td>${g.requests.toLocaleString()}</td><td>${usd(g.cost)}</td>
+      <td>${tok(g.input + g.cache_read + g.cache_write)}</td><td>${tok(g.output)}</td>
+      <td class="${hitTone(g)}">${g.cache_read + g.cache_write + g.cached ? pct(g.cache_hit * 100) : "–"}</td>
+      <td>${g.cache_read + g.cache_write ? pct(g.write_share * 100) : "–"}</td></tr>`).join("");
+  const table = (title, groups, name) => `<div class="card"><div class="group-title">${title}</div><table class="stats">
+      <tr><th>${title.replace(/^By /, "")}</th><th>Requests</th><th>Cost</th><th>Prompt</th><th>Output</th><th>Cache hit</th><th>Writes</th></tr>
+      ${rows(groups, name)}</table></div>`;
+  const acc = (stats.accuracy || []).filter((a) => a.reported > 0 || a.predicted > 0);
+  const accTone = (x) => x > 1.15 ? "bad" : x < 0.6 ? "warn" : "good";
+  const accCard = `<div class="card"><div class="group-title">Estimate check</div>
+    <div class="hint">For each account window: the rise the capacity estimate predicts from the proxy's own requests, against the rise the provider reported over the same span. Usage outside the proxy only adds to the reported rise, so a ratio at or under 100% is expected; well above 100% means the capacity is underestimated.</div>
+    ${acc.length ? `<table class="stats"><tr><th>Account · window</th><th>Spans</th><th>Proxy cost</th><th>Predicted</th><th>Reported</th><th>Explained</th></tr>
+      ${acc.map((a) => `<tr><td>${esc(labels[a.account] || a.account)} · ${esc(windowLabel(a.window))}</td><td>${a.intervals}</td><td>${usd(a.cost)}</td>
+        <td>${a.predicted.toFixed(1)} pts</td><td>${a.reported.toFixed(1)} pts</td><td class="${a.reported ? accTone(a.explained) : ""}">${a.reported ? pct(a.explained * 100) : "–"}</td></tr>`).join("")}</table>`
+      : '<div class="muted">Needs calibrated windows and a few reported rises in this period.</div>'}</div>`;
+  const t = stats.total;
+  const since = stats.log_from && new Date(stats.log_from) > new Date(stats.since) ? ` <span class="lim">(log starts ${new Date(stats.log_from).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })})</span>` : "";
+  return head + `<div class="hint">${t.requests.toLocaleString()} requests · ${usd(t.cost)} · cache hit ${pct(t.cache_hit * 100)}${since}</div>
+    <div class="usage">${table("By key", stats.keys, (g) => g.name)}${table("By account", stats.accounts, (g) => labels[g.name] || g.name)}
+    ${table("By model", stats.models, (g) => g.name || "(unknown)")}${accCard}</div></section>`;
 }
 function header(meta) {
   return `<div class="header"><div class="copy"><h1 class="title">Budgets</h1><p class="meta">${meta || "loading"}</p></div>
@@ -587,7 +632,8 @@ async function copy(text) {
 document.addEventListener("click", (e) => {
   const b = e.target.closest("[data-act]"); if (!b) return;
   const i = b.dataset.i == null ? null : +b.dataset.i;
-  ({ add: () => editKey(null), edit: () => editKey(i), delete: () => deleteKey(i), connect: () => connect(i), settings, refresh: () => load() })[b.dataset.act]();
+  ({ add: () => editKey(null), edit: () => editKey(i), delete: () => deleteKey(i), connect: () => connect(i), settings, refresh: () => load(),
+    period: () => { period = b.dataset.p; sessionStorage.setItem("budgetGuardPeriod", period); stats = null; render(); load(true); } })[b.dataset.act]();
 });
 load();
 setInterval(() => { if (!document.getElementById("modal-root").firstChild && !document.hidden) load(true); }, 30000);

@@ -287,9 +287,10 @@ type Usage struct {
 }
 
 // HandleUsage books a finished request: cost per window, and the headers' utilization readings.
-func (e *Engine) HandleUsage(u Usage) {
+// It returns the request as booked, for the request log (ok is false when nothing was booked).
+func (e *Engine) HandleUsage(u Usage) (entry Entry, ok bool) {
 	if u.AuthID == "" {
-		return
+		return entry, false
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -309,7 +310,32 @@ func (e *Engine) HandleUsage(u Usage) {
 	} else if k := e.byScope[CallerScope(u.APIKey)]; k != nil {
 		keyName = k.Name
 	}
-	if cost := Cost(e.cfg.Pricing, a.Provider, u.Model, u.Tokens); cost > 0 {
+	cost := Cost(e.cfg.Pricing, a.Provider, u.Model, u.Tokens)
+	entry = Entry{At: now, Key: keyName, Provider: a.Provider, Account: a.ID, Model: u.Model, Failed: u.Failed,
+		Input: u.Tokens.Input, Output: u.Tokens.Output, Cached: u.Tokens.Cached, CacheRead: u.Tokens.CacheRead,
+		CacheWrite: u.Tokens.CacheCreate, Cost: cost, Windows: map[string]EntryNote{}}
+	for _, o := range obs {
+		u := o.Util
+		n := entry.Windows[o.Window]
+		n.Util = &u
+		if !o.ResetsAt.IsZero() {
+			n.Resets = o.ResetsAt.Unix()
+		}
+		entry.Windows[o.Window] = n
+	}
+	for id, w := range a.Windows {
+		if scopeMatches(w.Scope, u.Model, limits) {
+			n := entry.Windows[id]
+			n.Booked = cost > 0
+			c, q := a.Capacity(id)
+			if q == QualityCalibrated || q == QualityRatio {
+				n.Cap = c
+			}
+			n.Quality = q
+			entry.Windows[id] = n
+		}
+	}
+	if cost > 0 {
 		for _, w := range a.Windows {
 			if scopeMatches(w.Scope, u.Model, limits) {
 				w.AddCost(keyName, cost, now)
@@ -323,6 +349,7 @@ func (e *Engine) HandleUsage(u Usage) {
 		}
 		e.dirty = true
 	}
+	return entry, true
 }
 
 // Decision is the outcome of a budget check.

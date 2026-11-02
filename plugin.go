@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ var (
 	loaded    bool
 	stopCh    chan struct{}
 	pollEvery = make(chan time.Duration, 1)
+	reqLog    *guard.RequestLog // nil when disabled
 )
 
 // ---- wire types (subset of CPA's sdk/pluginapi; JSON uses Go field names unless tagged) ----
@@ -107,6 +109,7 @@ type managementRequest struct {
 	Method  string
 	Path    string
 	Headers http.Header
+	Query   url.Values
 	Body    []byte
 }
 
@@ -142,6 +145,8 @@ func handleMethod(method string, req []byte) ([]byte, error) {
 			"routes": []managementRoute{
 				{Method: "GET", Path: "/budget-guard/status",
 					Description: "Per-key budget usage and per-account limit windows (JSON)."},
+				{Method: "GET", Path: "/budget-guard/stats",
+					Description: "Request log summary (?period=1h|5h|24h|7d|30d|90d): cost and cache use per key, account and model, and how well the capacity estimates explain the reported usage."},
 				{Method: "GET", Path: "/budget-guard/hub/auth-files",
 					Description: "Pool accounts for usage-limit clients such as T3 Code (client key in " + hubKeyHeader + ")."},
 				{Method: "POST", Path: "/budget-guard/hub/api-call",
@@ -165,6 +170,7 @@ func registrationInfo() registration {
 			ConfigFields: []configField{
 				{Name: "state_file", Type: "string", Description: "Where calibration and accounting state is persisted."},
 				{Name: "poll_interval", Type: "string", Description: "How often each account's usage endpoint is polled (e.g. 3m)."},
+				{Name: "request_log_days", Type: "integer", Description: "Days of per-request log to keep next to the state file (default 90, -1 disables)."},
 				{Name: "keys", Type: "array", Description: "Budgeted client keys: name, key, budgets.<provider>.own_share / pool_ceiling (window -> percent)."},
 			},
 		},
@@ -196,6 +202,18 @@ func configure(raw []byte) error {
 		}
 		stateFile, loaded = cfg.StateFile, true
 	}
+	switch {
+	case cfg.RequestLogDays < 0:
+		if reqLog != nil {
+			reqLog.Close()
+			reqLog = nil
+		}
+	case reqLog == nil || reqLog.Dir() != cfg.RequestLogDir():
+		if reqLog != nil {
+			reqLog.Close()
+		}
+		reqLog = guard.NewRequestLog(cfg.RequestLogDir(), cfg.RequestLogDays)
+	}
 	if stopCh == nil {
 		stopCh = make(chan struct{})
 		go pollLoop(stopCh, cfg.PollInterval)
@@ -219,6 +237,9 @@ func shutdown() {
 	}
 	if stateFile != "" {
 		_ = engine.Save(stateFile)
+	}
+	if reqLog != nil {
+		reqLog.Close()
 	}
 }
 
@@ -344,12 +365,58 @@ func handleUsage(raw []byte) {
 		logf("warn", "budget-guard: bad usage record: %v", err)
 		return
 	}
-	engine.HandleUsage(guard.Usage{
+	entry, ok := engine.HandleUsage(guard.Usage{
 		APIKey: rec.APIKey, AuthID: rec.AuthID, Provider: rec.Provider, Model: rec.Model, Failed: rec.Failed,
 		Headers: rec.ResponseHeaders,
 		Tokens: guard.Tokens{Input: rec.Detail.InputTokens, Output: rec.Detail.OutputTokens, Cached: rec.Detail.CachedTokens,
 			CacheRead: rec.Detail.CacheReadTokens, CacheCreate: rec.Detail.CacheCreationTokens},
 	})
+	lifeMu.Lock()
+	l := reqLog
+	lifeMu.Unlock()
+	if ok && l != nil {
+		if err := l.Append(entry); err != nil {
+			logf("warn", "budget-guard: request log: %v", err)
+		}
+	}
+}
+
+// statsPeriods are the periods the stats endpoint accepts (?period=).
+var statsPeriods = map[string]time.Duration{"1h": time.Hour, "5h": 5 * time.Hour, "24h": 24 * time.Hour,
+	"7d": 7 * 24 * time.Hour, "30d": 30 * 24 * time.Hour, "90d": 90 * 24 * time.Hour}
+
+func handleStats(req managementRequest) ([]byte, error) {
+	period := req.Query.Get("period")
+	if period == "" {
+		period = "24h"
+	}
+	d, ok := statsPeriods[period]
+	if !ok {
+		return jsonResponse(400, map[string]string{"error": "period must be one of 1h, 5h, 24h, 7d, 30d, 90d"})
+	}
+	lifeMu.Lock()
+	l := reqLog
+	lifeMu.Unlock()
+	if l == nil {
+		return jsonResponse(404, map[string]string{"error": "the request log is disabled (request_log_days: -1)"})
+	}
+	now := time.Now()
+	entries, err := l.Read(now.Add(-d))
+	if err != nil {
+		return jsonResponse(500, map[string]string{"error": err.Error()})
+	}
+	st := guard.Summarise(entries, now.Add(-d), now)
+	st.LogDir = l.Dir()
+	return jsonResponse(200, st)
+}
+
+func jsonResponse(status int, v any) ([]byte, error) {
+	body, err := json.MarshalIndent(v, "", " ")
+	if err != nil {
+		return nil, err
+	}
+	return okEnvelope(managementResponse{StatusCode: status,
+		Headers: http.Header{"Content-Type": {"application/json"}, "Cache-Control": {"no-store"}}, Body: body})
 }
 
 // ---- management ----
@@ -366,6 +433,9 @@ func handleManagement(raw []byte) ([]byte, error) {
 		if _, endpoint, ok := strings.Cut(path, "/budget-guard/hub/"); ok {
 			return handleHub(req, endpoint)
 		}
+	}
+	if strings.HasPrefix(path, "/v0/management/") && strings.HasSuffix(path, "/budget-guard/stats") {
+		return handleStats(req)
 	}
 	if strings.HasPrefix(path, "/v0/management/") && strings.HasSuffix(path, "/budget-guard/status") {
 		body, err := json.MarshalIndent(engine.Snapshot(), "", " ")

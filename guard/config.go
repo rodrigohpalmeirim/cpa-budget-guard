@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -23,6 +24,13 @@ type Config struct {
 	Keys []KeyConfig `yaml:"keys"`
 	// Pricing rules are checked before the built-in defaults (first match wins).
 	Pricing []PriceRule `yaml:"pricing"`
+	// RequestLogDays is how many days of the per-request log to keep (default 90; -1 disables the log).
+	RequestLogDays int `yaml:"request_log_days"`
+}
+
+// RequestLogDir is where the request log lives: next to the state file.
+func (c Config) RequestLogDir() string {
+	return filepath.Join(filepath.Dir(c.StateFile), "budget-guard-requests")
 }
 
 // KeyConfig is one budgeted client key (one machine or CLI).
@@ -83,6 +91,9 @@ func ParseConfig(raw []byte) (Config, error) {
 	}
 	if cfg.CalibrationStep <= 0 {
 		cfg.CalibrationStep = 3
+	}
+	if cfg.RequestLogDays == 0 {
+		cfg.RequestLogDays = 90
 	}
 	seenNames := map[string]bool{}
 	seenKeys := map[string]bool{}

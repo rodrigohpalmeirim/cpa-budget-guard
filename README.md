@@ -90,6 +90,7 @@ gives ready-to-paste settings for Claude Code, Codex CLI and OpenAI-compatible c
     budget-guard:
       # ...
       poll_interval: 3m          # per-account usage endpoint polling
+      request_log_days: 90       # per-request log next to the state file; -1 disables
       calibration_step: 3        # % rise that closes a calibration segment
       keys:
         - name: laptop
@@ -108,8 +109,29 @@ gives ready-to-paste settings for Claude Code, Codex CLI and OpenAI-compatible c
 
 - `GET /v0/management/budget-guard/status`: JSON with every key's standing per window, every account's
   windows, and calibration state. Requires the management key.
+- `GET /v0/management/budget-guard/stats?period=1h|5h|24h|7d|30d|90d`: the request log summarised (see above).
 - `/v0/resource/plugins/budget-guard/status`: the web page. It's static HTML; CLIProxyAPI serves
   plugin resources without authentication, so the page fetches all data from the endpoint above.
+
+## Request log and usage stats
+
+Every request through the proxy is appended to a JSON-lines log next to the state file
+(`budget-guard-requests/requests-YYYY-MM-DD.jsonl`, one file per UTC day, kept for
+`request_log_days`, default 90; `-1` turns it off). A line holds the key name, account, model, token
+counts (input, output, cache reads and writes), API-equivalent cost, and for each limit window the
+utilization the response headers reported and the capacity estimate the request was booked against.
+It holds no prompts, responses or keys. Expect a few hundred bytes per request.
+
+The **Usage** section of the page summarises it for a period (1h to 30d), per key, account and model:
+
+- **Cache hit**: the share of prompt tokens read from cache. If conversations hop between accounts
+  (broken session affinity), the hit rate drops and the write share rises.
+- **Estimate check**: for each account window, the rise the capacity estimate predicts from the
+  proxy's own requests, against the rise the provider reported over the same requests. Usage outside
+  the proxy only adds to the reported rise, so up to 100% is expected; well above 100% means the
+  capacity is underestimated.
+
+The same data is at `GET /v0/management/budget-guard/stats?period=24h` (management key).
 
 ## Usage limits in T3 Code
 
@@ -147,7 +169,7 @@ In T3, set the hub URL to the proxy's public address and enter the machine's cli
 | `main.go` | C ABI glue and host callbacks |
 | `plugin.go` | RPC handlers: request interceptor, usage hook, management routes, usage poller |
 | `hub.go` | Usage-limit endpoints for T3 Code, authenticated by a client key |
-| `guard/` | Windows, calibration, pricing and enforcement: pure Go with unit tests |
+| `guard/` | Windows, calibration, pricing, enforcement and the request log: pure Go with unit tests |
 | `status.html` | The embedded web page; it uses the management panel's design tokens and follows its theme |
 | `e2e/ui_test.py` | Playwright test that drives the page against a live proxy |
 
