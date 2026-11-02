@@ -343,7 +343,7 @@ function usageSection() {
       <td class="${hitTone(g)}">${g.cache_read + g.cache_write + g.cached ? pct(g.cache_hit * 100) : "–"}</td>
       <td>${g.cache_read + g.cache_write ? pct(g.write_share * 100) : "–"}</td></tr>`).join("");
   const table = (title, groups, name) => `<div class="card"><div class="group-title">${title}</div><table class="stats">
-      <tr><th>${title.replace(/^By /, "")}</th><th>Requests</th><th>Cost</th><th>Prompt</th><th>Output</th><th>Cache hit</th><th>Writes</th></tr>
+      <tr><th>${title.replace(/^By (.)/, (_, c) => c.toUpperCase())}</th><th>Requests</th><th>Cost</th><th>Prompt</th><th>Output</th><th>Cache hit</th><th>Writes</th></tr>
       ${rows(groups, name)}</table></div>`;
   const acc = (stats.accuracy || []).filter((a) => a.reported > 0 || a.predicted > 0);
   const accTone = (x) => x > 1.15 ? "bad" : x < 0.6 ? "warn" : "good";
@@ -351,7 +351,7 @@ function usageSection() {
     <div class="hint">For each account window: the rise the capacity estimate predicts from the proxy's own requests, against the rise the provider reported over the same span. Usage outside the proxy only adds to the reported rise, so a ratio at or under 100% is expected; well above 100% means the capacity is underestimated.</div>
     ${acc.length ? `<table class="stats"><tr><th>Account · window</th><th>Spans</th><th>Proxy cost</th><th>Predicted</th><th>Reported</th><th>Explained</th></tr>
       ${acc.map((a) => `<tr><td>${esc(labels[a.account] || a.account)} · ${esc(windowLabel(a.window))}</td><td>${a.intervals}</td><td>${usd(a.cost)}</td>
-        <td>${a.predicted.toFixed(1)} pts</td><td>${a.reported.toFixed(1)} pts</td><td class="${a.reported ? accTone(a.explained) : ""}">${a.reported ? pct(a.explained * 100) : "–"}</td></tr>`).join("")}</table>`
+        <td>${a.predicted.toFixed(1)} pts</td><td>${a.reported.toFixed(1)} pts</td>${a.reported >= 5 ? `<td class="${accTone(a.explained)}">${pct(a.explained * 100)}</td>` : '<td class="muted" title="Shown once the provider has reported at least 5 points: its readings are whole percents">–</td>'}</tr>`).join("")}</table>`
       : '<div class="muted">Needs calibrated windows and a few reported rises in this period.</div>'}</div>`;
   const t = stats.total;
   const since = stats.log_from && new Date(stats.log_from) > new Date(stats.since) ? ` <span class="lim">(log starts ${new Date(stats.log_from).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })})</span>` : "";
