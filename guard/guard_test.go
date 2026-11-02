@@ -369,3 +369,43 @@ func TestOldCalibrationIsDiscarded(t *testing.T) {
 		t.Fatalf("segments %v, ratios %v, cost %v", w.Segments, a.Ratios, w.ProxyCost)
 	}
 }
+
+func TestPlanUpgradeIsAcceptedAndRecalibrates(t *testing.T) {
+	e, c := testEngine(t, "keys: [{name: laptop, key: sk-laptop}]")
+	s := newSim(e, c, "acct-1", 200)
+	for i := 0; i < 120; i++ {
+		s.request("sk-laptop")
+		c.add(time.Minute)
+	}
+	a := e.accounts["acct-1"]
+	if _, q := a.Capacity("5h"); q != QualityCalibrated {
+		t.Fatalf("not calibrated before the upgrade: %s", q)
+	}
+	// The plan grows 5x: the same usage now reads as a fifth, within the same periods.
+	s.cap5h *= 5
+	s.request("sk-laptop")
+	c.add(time.Minute)
+	if w := a.Windows["5h"]; w.Util < 50 {
+		t.Fatalf("a single lower reading was accepted: %v", w.Util)
+	}
+	s.request("sk-laptop")
+	c.add(time.Minute)
+	if w := a.Windows["5h"]; w.Util > 20 {
+		t.Fatalf("confirmed drop not accepted: util %v", w.Util)
+	}
+	if _, q := a.Capacity("5h"); q == QualityCalibrated {
+		t.Fatal("old calibration kept after the limit changed")
+	}
+	if a.Ratios != nil || len(a.Windows["7d"].Segments) != 0 {
+		t.Fatal("other windows kept their calibration")
+	}
+	for i := 0; i < 240; i++ {
+		s.request("sk-laptop")
+		c.add(time.Minute)
+	}
+	cap5, q5 := a.Capacity("5h")
+	if q5 != QualityCalibrated {
+		t.Fatalf("not recalibrated: %s", q5)
+	}
+	near(t, "5h capacity after upgrade", cap5, 1000, 100)
+}

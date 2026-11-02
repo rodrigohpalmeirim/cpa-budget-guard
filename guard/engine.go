@@ -186,7 +186,13 @@ func (e *Engine) applyLocked(a *Account, obs []Observation, source string, now t
 	}
 	for i := range obs {
 		obs[i].Source = source
-		a.window(obs[i]).Observe(obs[i], now, e.cfg.CalibrationStep)
+		if a.window(obs[i]).Observe(obs[i], now, e.cfg.CalibrationStep) {
+			// A plan change moves every window of the account, including ones idle right now.
+			a.Ratios, a.LastPairs = nil, nil
+			for _, w := range a.Windows {
+				w.Anchor, w.Segments = nil, nil
+			}
+		}
 	}
 	e.updateRatiosLocked(a, obs, source)
 	e.dirty = true
