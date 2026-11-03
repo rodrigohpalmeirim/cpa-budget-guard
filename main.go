@@ -63,7 +63,7 @@ import (
 
 const (
 	pluginID      = "budget-guard"
-	pluginVersion = "0.5.1"
+	pluginVersion = "0.5.2"
 	abiVersion    = 1
 	schemaVersion = 9
 )

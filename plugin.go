@@ -152,14 +152,14 @@ func handleMethod(method string, req []byte) ([]byte, error) {
 				{Method: "GET", Path: "/budget-guard/stats",
 					Description: "Request log summary (?period=1h|5h|24h|7d|30d|90d): cost and cache use per key, account and model, and how well the capacity estimates explain the reported usage."},
 				{Method: "GET", Path: "/budget-guard/timeline",
-					Description: "One provider window over time (?provider=claude&window=7d&hours=168): pool remaining per step, each account's utilization, spend per key."},
+					Description: "One provider window over time (query: provider, window, hours): pool remaining per step, utilization per account, spend per key."},
 				{Method: "GET", Path: "/budget-guard/hub/auth-files",
 					Description: "Pool accounts for usage-limit clients such as T3 Code (client key in " + hubKeyHeader + ")."},
 				{Method: "POST", Path: "/budget-guard/hub/api-call",
 					Description: "Provider usage endpoints for usage-limit clients (client key in " + hubKeyHeader + ")."},
 			},
 			"resources": []managementRoute{{Path: "/status", Menu: "Budgets",
-				Description: "Per-key budget usage against the subscription pool's limits."}},
+				Description: "Per-key budget usage against the limits of the subscription pool."}},
 		})
 	case "management.handle":
 		return handleManagement(req)
@@ -175,9 +175,9 @@ func registrationInfo() registration {
 			GitHubRepository: "https://github.com/rodrigohpalmeirim/cpa-budget-guard",
 			ConfigFields: []configField{
 				{Name: "state_file", Type: "string", Description: "Where calibration and accounting state is persisted."},
-				{Name: "poll_interval", Type: "string", Description: "How often each account's usage endpoint is polled (e.g. 3m)."},
+				{Name: "poll_interval", Type: "string", Description: "How often the usage endpoint of each account is polled (e.g. 3m)."},
 				{Name: "request_log_days", Type: "integer", Description: "Days of per-request log to keep next to the state file (default 90, -1 disables)."},
-				{Name: "keys", Type: "array", Description: "Budgeted client keys: name, key, budgets.<provider>.own_share / pool_ceiling (window -> percent)."},
+				{Name: "keys", Type: "array", Description: "Budgeted client keys. Edit them on the Pool page or the Budgets page rather than here."},
 			},
 		},
 		Capabilities: capabilities{RequestInterceptor: true, RequestInterceptorOmitBodyBefore: true,
