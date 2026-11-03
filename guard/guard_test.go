@@ -107,6 +107,11 @@ func TestCost(t *testing.T) {
 	if Cost(nil, "claude", "claude-haiku-5-5", Tokens{Output: 1e6}) >= Cost(nil, "claude", "claude-sonnet-5-5", Tokens{Output: 1e6}) {
 		t.Fatal("haiku should weigh less than sonnet")
 	}
+	// 1-hour writes (when the host reports the split) cost 2x input; the rest stay 5-minute.
+	c = Cost(nil, "claude", "claude-opus-5-5", Tokens{CacheCreate: 3e6, CacheCreate1h: 2e6})
+	near(t, "opus 1h writes", c, 5+2*8, 1e-9)
+	c = Cost([]PriceRule{{Match: "opus", Input: 4, CacheWrite: 5, CacheWrite1h: 9}}, "claude", "claude-opus-5-5", Tokens{CacheCreate: 1e6, CacheCreate1h: 5e6})
+	near(t, "configured 1h price, split clamped to the total", c, 9, 1e-9)
 	// Codex: cached is a subset of input.
 	near(t, "codex cost", Cost(nil, "codex", "gpt-6", Tokens{Input: 2e6, Cached: 1e6, Output: 1e6}), 1.25+0.125+10, 1e-9)
 }

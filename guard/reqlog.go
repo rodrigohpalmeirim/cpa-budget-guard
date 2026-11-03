@@ -15,19 +15,20 @@ import (
 // Entry is one finished request as the engine booked it. The request log keeps one per line, so
 // cache use, cost per key and the capacity estimates can be checked after the fact.
 type Entry struct {
-	At         time.Time            `json:"t"`
-	Key        string               `json:"key,omitempty"` // budgeted key name; empty for other keys
-	Provider   string               `json:"provider"`
-	Account    string               `json:"account"`
-	Model      string               `json:"model,omitempty"`
-	Failed     bool                 `json:"failed,omitempty"`
-	Input      int64                `json:"in,omitempty"`
-	Output     int64                `json:"out,omitempty"`
-	Cached     int64                `json:"cached,omitempty"` // OpenAI/Codex: cached subset of input
-	CacheRead  int64                `json:"cr,omitempty"`
-	CacheWrite int64                `json:"cw,omitempty"`
-	Cost       float64              `json:"cost"`
-	Windows    map[string]EntryNote `json:"w,omitempty"`
+	At           time.Time            `json:"t"`
+	Key          string               `json:"key,omitempty"` // budgeted key name; empty for other keys
+	Provider     string               `json:"provider"`
+	Account      string               `json:"account"`
+	Model        string               `json:"model,omitempty"`
+	Failed       bool                 `json:"failed,omitempty"`
+	Input        int64                `json:"in,omitempty"`
+	Output       int64                `json:"out,omitempty"`
+	Cached       int64                `json:"cached,omitempty"` // OpenAI/Codex: cached subset of input
+	CacheRead    int64                `json:"cr,omitempty"`
+	CacheWrite   int64                `json:"cw,omitempty"`
+	CacheWrite1h int64                `json:"cw1h,omitempty"` // 1-hour TTL part of CacheWrite, when reported
+	Cost         float64              `json:"cost"`
+	Windows      map[string]EntryNote `json:"w,omitempty"`
 	// Poll marks a usage-endpoint reading rather than a request: it carries utilization only,
 	// so the history covers idle periods too. Statistics skip these.
 	Poll bool `json:"poll,omitempty"`

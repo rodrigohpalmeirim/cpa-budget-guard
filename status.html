@@ -569,7 +569,7 @@ function settings() {
   const prow = (r, i) => `<tr data-i="${i}">
     <td><select class="input" data-f="provider">${["", "claude", "codex"].map((p) => `<option value="${p}"${(r.provider || "") === p ? " selected" : ""}>${p ? PROVIDERS[p] : "Any"}</option>`).join("")}</select></td>
     <td><input class="input" data-f="match" value="${esc(r.match || "")}" placeholder="any model"></td>
-    ${["input", "output", "cache_read", "cache_write"].map((f) => `<td class="w" style="width:92px"><input class="input num" type="number" min="0" step="any" data-f="${f}" value="${r[f] ?? ""}"></td>`).join("")}
+    ${["input", "output", "cache_read", "cache_write", "cache_write_1h"].map((f) => `<td class="w" style="width:92px"><input class="input num" type="number" min="0" step="any" data-f="${f}" value="${r[f] ?? ""}"></td>`).join("")}
     <td><button class="btn btn-ghost btn-icon" data-rm="${i}" title="Remove">${ICON.trash}</button></td></tr>`;
   const body = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">
       <div class="field"><label for="pi">Usage polling</label><input class="input" id="pi" value="${esc(cfg.poll_interval || "3m")}">
@@ -578,14 +578,14 @@ function settings() {
         <span class="hint">Usage rise that closes a calibration sample.</span></div></div>
     <div class="field"><label>Price weights <span class="muted">(USD per 1M tokens)</span></label>
       <span class="hint">Only ratios matter — they decide how much a request counts relative to others (Opus vs Haiku, output vs cache reads). Rules here are checked before the built-in API prices; first match wins.</span></div>
-    <table class="edit" id="pt"><tr><th>Provider</th><th>Model contains</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th></th></tr>${pricing.map(prow).join("")}</table>
+    <table class="edit" id="pt"><tr><th>Provider</th><th>Model contains</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th>1h write</th><th></th></tr>${pricing.map(prow).join("")}</table>
     <button class="btn btn-ghost btn-sm" id="padd" style="margin-top:8px">${ICON.plus}Add rule</button>
     <details style="margin-top:12px"><summary>Built-in weights (API list prices)</summary>
-      <table class="edit"><tr><th>Provider</th><th>Model contains</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th></tr>
+      <table class="edit"><tr><th>Provider</th><th>Model contains</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th>1h write</th></tr>
       ${(status.pricing_defaults || []).map((r) => `<tr><td>${esc(PROVIDERS[r.provider] || r.provider || "Any")}</td><td class="mono">${esc(r.match || "any")}</td>
-        ${[r.input, r.output, r.cache_read, r.cache_write].map((v) => `<td class="num">${v ? "$" + v : "–"}</td>`).join("")}</tr>`).join("")}</table></details>
+        ${[r.input, r.output, r.cache_read, r.cache_write, r.cache_write_1h || 2 * r.input].map((v) => `<td class="num">${v ? "$" + v : "–"}</td>`).join("")}</tr>`).join("")}</table></details>
     <div class="err-text" id="serr" style="margin-top:8px"></div>`;
-  const m = modal("Settings", body, `<button class="btn btn-secondary" data-close>Cancel</button><button class="btn btn-primary" id="ssave">Save</button>`, { width: "820px" });
+  const m = modal("Settings", body, `<button class="btn btn-secondary" data-close>Cancel</button><button class="btn btn-primary" id="ssave">Save</button>`, { width: "900px" });
   const $ = (s) => m.el.querySelector(s);
   const collect = () => Array.from(m.el.querySelectorAll("#pt tr[data-i]")).map((tr) => {
     const r = {};
@@ -597,7 +597,7 @@ function settings() {
     return r;
   });
   const redraw = (rows) => {
-    $("#pt").innerHTML = `<tr><th>Provider</th><th>Model contains</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th></th></tr>` + rows.map(prow).join("");
+    $("#pt").innerHTML = `<tr><th>Provider</th><th>Model contains</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th>1h write</th><th></th></tr>` + rows.map(prow).join("");
     m.el.querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", () => { const r = collect(); r.splice(+b.dataset.rm, 1); redraw(r); }));
   };
   redraw(pricing);

@@ -57,7 +57,9 @@ type PriceRule struct {
 	Input      float64 `yaml:"input" json:"input"`
 	Output     float64 `yaml:"output" json:"output"`
 	CacheRead  float64 `yaml:"cache_read" json:"cache_read"`
-	CacheWrite float64 `yaml:"cache_write" json:"cache_write"`
+	CacheWrite float64 `yaml:"cache_write" json:"cache_write"` // 5-minute cache writes
+	// CacheWrite1h prices 1-hour cache writes; 0 means twice Input.
+	CacheWrite1h float64 `yaml:"cache_write_1h" json:"cache_write_1h,omitempty"`
 }
 
 const callerScopePrefix = "cli-proxy-api:caller-scope:v1\x00"

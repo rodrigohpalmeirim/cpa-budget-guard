@@ -86,6 +86,9 @@ type usageDetail struct {
 	CachedTokens        int64
 	CacheReadTokens     int64
 	CacheCreationTokens int64
+	// CacheCreation1hTokens is the 1-hour TTL part of CacheCreationTokens; hosts that predate
+	// the TTL split omit it.
+	CacheCreation1hTokens *int64 `json:",omitempty"`
 }
 
 type usageRecord struct {
@@ -372,7 +375,8 @@ func handleUsage(raw []byte) {
 		APIKey: rec.APIKey, AuthID: rec.AuthID, Provider: rec.Provider, Model: rec.Model, Failed: rec.Failed,
 		Headers: rec.ResponseHeaders,
 		Tokens: guard.Tokens{Input: rec.Detail.InputTokens, Output: rec.Detail.OutputTokens, Cached: rec.Detail.CachedTokens,
-			CacheRead: rec.Detail.CacheReadTokens, CacheCreate: rec.Detail.CacheCreationTokens},
+			CacheRead: rec.Detail.CacheReadTokens, CacheCreate: rec.Detail.CacheCreationTokens,
+			CacheCreate1h: deref(rec.Detail.CacheCreation1hTokens)},
 	})
 	lifeMu.Lock()
 	l := reqLog
@@ -731,4 +735,11 @@ func guarded(what string, fn func()) {
 func logf(level, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	go func() { _ = callHost("host.log", map[string]any{"level": level, "message": msg}, nil) }()
+}
+
+func deref(p *int64) int64 {
+	if p == nil {
+		return 0
+	}
+	return *p
 }

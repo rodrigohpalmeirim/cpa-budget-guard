@@ -313,7 +313,7 @@ func (e *Engine) HandleUsage(u Usage) (entry Entry, ok bool) {
 	cost := Cost(e.cfg.Pricing, a.Provider, u.Model, u.Tokens)
 	entry = Entry{At: now, Key: keyName, Provider: a.Provider, Account: a.ID, Model: u.Model, Failed: u.Failed,
 		Input: u.Tokens.Input, Output: u.Tokens.Output, Cached: u.Tokens.Cached, CacheRead: u.Tokens.CacheRead,
-		CacheWrite: u.Tokens.CacheCreate, Cost: cost, Windows: map[string]EntryNote{}}
+		CacheWrite: u.Tokens.CacheCreate, CacheWrite1h: u.Tokens.CacheCreate1h, Cost: cost, Windows: map[string]EntryNote{}}
 	for _, o := range obs {
 		u := o.Util
 		n := entry.Windows[o.Window]

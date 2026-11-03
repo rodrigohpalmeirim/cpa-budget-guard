@@ -105,6 +105,10 @@ gives ready-to-paste settings for Claude Code, Codex CLI and OpenAI-compatible c
         - {provider: claude, match: opus, input: 5, output: 25, cache_read: 0.5, cache_write: 6.25}
 ```
 
+`cache_write` prices 5-minute cache writes. 1-hour writes (`cache_write_1h`, default twice `input`) are
+told apart only when CLIProxyAPI reports the TTL split to plugins (`UsageDetail.CacheCreation1hTokens`);
+on older versions every write is priced as 5-minute.
+
 ## Status API
 
 - `GET /v0/management/budget-guard/status`: JSON with every key's standing per window, every account's

@@ -9,6 +9,9 @@ type Tokens struct {
 	Cached      int64 // OpenAI/Codex: cached subset of Input
 	CacheRead   int64 // Claude: cache reads (not part of Input)
 	CacheCreate int64 // Claude: cache writes (not part of Input)
+	// CacheCreate1h is the part of CacheCreate written with a 1-hour TTL, billed at a higher
+	// rate. Only known when the host reports the TTL split; otherwise all writes count as 5-minute.
+	CacheCreate1h int64
 }
 
 // defaultPricing is API list price in USD per million tokens (input, output, cache read,
@@ -26,6 +29,15 @@ var defaultPricing = []PriceRule{
 	{Provider: "codex", Match: "mini", Input: 0.25, Output: 2, CacheRead: 0.025},
 	{Provider: "codex", Input: 1.25, Output: 10, CacheRead: 0.125},
 	{Input: 1, Output: 5, CacheRead: 0.1, CacheWrite: 1.25},
+}
+
+// cacheWrite1h is the 1-hour cache write price: as configured, else twice the input price
+// (Anthropic bills 5-minute writes at 1.25x input and 1-hour writes at 2x).
+func (p PriceRule) cacheWrite1h() float64 {
+	if p.CacheWrite1h > 0 {
+		return p.CacheWrite1h
+	}
+	return 2 * p.Input
 }
 
 func priceFor(rules []PriceRule, provider, model string) PriceRule {
@@ -49,8 +61,9 @@ func Cost(rules []PriceRule, provider, model string, t Tokens) float64 {
 	p := priceFor(rules, provider, model)
 	perTok := func(price float64, n int64) float64 { return price * float64(n) / 1e6 }
 	if provider == "claude" {
-		return perTok(p.Input, t.Input) + perTok(p.Output, t.Output) +
-			perTok(p.CacheRead, t.CacheRead) + perTok(p.CacheWrite, t.CacheCreate)
+		long := min(max(t.CacheCreate1h, 0), t.CacheCreate)
+		return perTok(p.Input, t.Input) + perTok(p.Output, t.Output) + perTok(p.CacheRead, t.CacheRead) +
+			perTok(p.CacheWrite, t.CacheCreate-long) + perTok(p.cacheWrite1h(), long)
 	}
 	cached := t.Cached
 	if cached == 0 {
