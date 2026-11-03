@@ -13,6 +13,8 @@ type TimelineAccount struct {
 	Quality  string    `json:"calibration"`
 	Util     float64   `json:"util_pct"`
 	ResetsAt time.Time `json:"resets_at"`
+	// LastRequest is when the account last served a request through the proxy (zero if not in the log).
+	LastRequest time.Time `json:"last_request,omitempty"`
 	// Weight is the account's share of the pool used for the chart (capacity, or the mean of
 	// the known capacities while this one is calibrating).
 	Weight float64 `json:"weight"`
@@ -83,6 +85,9 @@ func BuildTimeline(entries []Entry, accounts []TimelineAccount, provider, window
 	for _, e := range entries {
 		if e.Provider != provider || idx[e.Account] == nil {
 			continue
+		}
+		if a := idx[e.Account]; !e.Poll && e.At.After(a.LastRequest) {
+			a.LastRequest = e.At
 		}
 		note, ok := e.Windows[window]
 		if !ok {
