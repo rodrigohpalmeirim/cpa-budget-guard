@@ -144,6 +144,11 @@ func TestTimelinePoolRemainingAndSpend(t *testing.T) {
 	now := start.Add(65 * time.Minute)
 	tl := BuildTimeline(entries, []TimelineAccount{
 		{ID: "a", Capacity: 300, Util: 30}, {ID: "b", Capacity: 100, Util: 50}}, "claude", "7d", 604800, start, now, step)
+	partial := BuildTimeline(entries[:1], []TimelineAccount{{ID: "a", Capacity: 300}, {ID: "b", Capacity: 100}},
+		"claude", "7d", 604800, start, now, step)
+	if partial.Remaining[0] != nil {
+		t.Fatal("pool shown before every account had a reading")
+	}
 	if len(tl.Remaining) != 7 || *tl.Remaining[0] != (300*90+100*50)/400.0 {
 		t.Fatalf("remaining[0] %v", *tl.Remaining[0])
 	}

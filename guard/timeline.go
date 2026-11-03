@@ -32,7 +32,7 @@ type Timeline struct {
 	Now       time.Time          `json:"now"`
 	Accounts  []*TimelineAccount `json:"accounts"`
 	// Remaining is the pool's remaining percent at each step, weighted by account size
-	// (nil where no account had a reading yet).
+	// (nil until every account has a reading).
 	Remaining []*float64 `json:"remaining"`
 	// Spend is the API-equivalent cost booked to this window per step, by key name
 	// ("" = keys without a budget, e.g. the admin key).
@@ -145,14 +145,16 @@ func BuildTimeline(entries []Entry, accounts []TimelineAccount, provider, window
 
 	for i := 0; i < n; i++ {
 		var w, rem float64
+		complete := true
 		for _, a := range tl.Accounts {
 			if a.Series[i] == nil {
-				continue
+				complete = false // a partial pool would read as a jump when the rest appears
+				break
 			}
 			w += a.Weight
 			rem += a.Weight * (100 - min(100, *a.Series[i]))
 		}
-		if w > 0 {
+		if complete && w > 0 {
 			v := rem / w
 			tl.Remaining[i] = &v
 		}
