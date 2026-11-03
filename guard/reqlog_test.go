@@ -129,3 +129,37 @@ func TestAccuracyIgnoresOutOfOrderReadings(t *testing.T) {
 		t.Fatalf("accuracy %+v", a)
 	}
 }
+
+func TestTimelinePoolRemainingAndSpend(t *testing.T) {
+	start := time.Unix(1_800_000_000, 0)
+	step := 10 * time.Minute
+	reset := start.Add(time.Hour).Unix()
+	entries := []Entry{
+		{At: start.Add(time.Minute), Provider: "claude", Account: "a", Key: "k1", Cost: 3,
+			Windows: map[string]EntryNote{"7d": {Util: ptr(10), Resets: reset, Booked: true}}},
+		PollEntry("b", "claude", []Observation{{Window: "7d", Util: 50}}, start.Add(2*time.Minute)),
+		{At: start.Add(15 * time.Minute), Provider: "claude", Account: "a", Key: "k2", Cost: 2,
+			Windows: map[string]EntryNote{"7d": {Util: ptr(20), Resets: reset, Booked: true}}},
+	}
+	now := start.Add(65 * time.Minute)
+	tl := BuildTimeline(entries, []TimelineAccount{
+		{ID: "a", Capacity: 300, Util: 30}, {ID: "b", Capacity: 100, Util: 50}}, "claude", "7d", 604800, start, now, step)
+	if len(tl.Remaining) != 7 || *tl.Remaining[0] != (300*90+100*50)/400.0 {
+		t.Fatalf("remaining[0] %v", *tl.Remaining[0])
+	}
+	if *tl.Remaining[1] != (300*80+100*50)/400.0 {
+		t.Fatalf("remaining[1] %v", *tl.Remaining[1])
+	}
+	if *tl.Accounts[0].Series[5] != 0 { // a's period reset at +60m with no newer reading
+		t.Fatalf("after reset %v", *tl.Accounts[0].Series[5])
+	}
+	if *tl.Accounts[0].Series[6] != 30 { // last step is the current standing
+		t.Fatalf("now %v", *tl.Accounts[0].Series[6])
+	}
+	if tl.Spend[0]["k1"] != 3 || tl.Spend[1]["k2"] != 2 || len(tl.Keys) != 2 {
+		t.Fatalf("spend %v keys %v", tl.Spend, tl.Keys)
+	}
+	if st := Summarise(entries, start, now); st.Total.Requests != 2 {
+		t.Fatalf("polls counted as requests: %d", st.Total.Requests)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -147,6 +148,8 @@ func handleMethod(method string, req []byte) ([]byte, error) {
 					Description: "Per-key budget usage and per-account limit windows (JSON)."},
 				{Method: "GET", Path: "/budget-guard/stats",
 					Description: "Request log summary (?period=1h|5h|24h|7d|30d|90d): cost and cache use per key, account and model, and how well the capacity estimates explain the reported usage."},
+				{Method: "GET", Path: "/budget-guard/timeline",
+					Description: "One provider window over time (?provider=claude&window=7d&hours=168): pool remaining per step, each account's utilization, spend per key."},
 				{Method: "GET", Path: "/budget-guard/hub/auth-files",
 					Description: "Pool accounts for usage-limit clients such as T3 Code (client key in " + hubKeyHeader + ")."},
 				{Method: "POST", Path: "/budget-guard/hub/api-call",
@@ -410,6 +413,70 @@ func handleStats(req managementRequest) ([]byte, error) {
 	return jsonResponse(200, st)
 }
 
+// handleTimeline charts one provider window: GET ...?provider=claude&window=7d&hours=168.
+func handleTimeline(req managementRequest) ([]byte, error) {
+	provider, window := strings.ToLower(req.Query.Get("provider")), strings.ToLower(req.Query.Get("window"))
+	if provider == "" || window == "" {
+		return jsonResponse(400, map[string]string{"error": "provider and window are required"})
+	}
+	st := engine.Snapshot()
+	var length int64
+	for _, w := range st.Windows {
+		if w.Provider == provider && w.Window == window {
+			length = w.LengthSec
+		}
+	}
+	var accounts []guard.TimelineAccount
+	for _, a := range st.Accounts {
+		if a.Provider != provider || a.Disabled {
+			continue
+		}
+		for _, w := range a.Windows {
+			if w.Window != window {
+				continue
+			}
+			ta := guard.TimelineAccount{ID: a.ID, Label: a.Label, Quality: w.Quality, Util: w.Util, ResetsAt: w.ResetsAt}
+			if w.Quality == guard.QualityCalibrated || w.Quality == guard.QualityRatio {
+				ta.Capacity = w.CapacityUSD
+			}
+			accounts = append(accounts, ta)
+		}
+	}
+	if len(accounts) == 0 {
+		return jsonResponse(404, map[string]string{"error": "no account reports that window"})
+	}
+	hours, _ := strconv.Atoi(req.Query.Get("hours"))
+	if hours <= 0 {
+		hours = int(length / 3600)
+		if hours <= 0 {
+			hours = 24
+		}
+	}
+	hours = min(hours, 24*90)
+	span := time.Duration(hours) * time.Hour
+	step := span / 240
+	for _, s := range []time.Duration{5 * time.Minute, 10 * time.Minute, 15 * time.Minute, 30 * time.Minute, time.Hour, 2 * time.Hour, 3 * time.Hour, 6 * time.Hour} {
+		if step <= s {
+			step = s
+			break
+		}
+	}
+	now := time.Now()
+	start := now.Add(-span).Truncate(step)
+	lifeMu.Lock()
+	l := reqLog
+	lifeMu.Unlock()
+	if l == nil {
+		return jsonResponse(404, map[string]string{"error": "the request log is disabled (request_log_days: -1)"})
+	}
+	// Read further back than the chart so the first steps already have a reading.
+	entries, err := l.Read(start.Add(-6 * time.Hour))
+	if err != nil {
+		return jsonResponse(500, map[string]string{"error": err.Error()})
+	}
+	return jsonResponse(200, guard.BuildTimeline(entries, accounts, provider, window, length, start, now, step))
+}
+
 func jsonResponse(status int, v any) ([]byte, error) {
 	body, err := json.MarshalIndent(v, "", " ")
 	if err != nil {
@@ -433,6 +500,9 @@ func handleManagement(raw []byte) ([]byte, error) {
 		if _, endpoint, ok := strings.Cut(path, "/budget-guard/hub/"); ok {
 			return handleHub(req, endpoint)
 		}
+	}
+	if strings.HasPrefix(path, "/v0/management/") && strings.HasSuffix(path, "/budget-guard/timeline") {
+		return handleTimeline(req)
 	}
 	if strings.HasPrefix(path, "/v0/management/") && strings.HasSuffix(path, "/budget-guard/stats") {
 		return handleStats(req)
@@ -603,6 +673,14 @@ func pollOnce() {
 			continue
 		}
 		engine.ApplyObservations(in.ID, in.Provider, obs)
+		lifeMu.Lock()
+		l := reqLog
+		lifeMu.Unlock()
+		if l != nil && len(obs) > 0 {
+			if err := l.Append(guard.PollEntry(in.ID, in.Provider, obs, time.Now())); err != nil {
+				logf("warn", "budget-guard: request log: %v", err)
+			}
+		}
 	}
 }
 

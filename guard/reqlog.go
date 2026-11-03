@@ -28,6 +28,23 @@ type Entry struct {
 	CacheWrite int64                `json:"cw,omitempty"`
 	Cost       float64              `json:"cost"`
 	Windows    map[string]EntryNote `json:"w,omitempty"`
+	// Poll marks a usage-endpoint reading rather than a request: it carries utilization only,
+	// so the history covers idle periods too. Statistics skip these.
+	Poll bool `json:"poll,omitempty"`
+}
+
+// PollEntry records one usage-endpoint poll of an account.
+func PollEntry(accountID, provider string, obs []Observation, now time.Time) Entry {
+	e := Entry{At: now, Poll: true, Provider: provider, Account: accountID, Windows: map[string]EntryNote{}}
+	for _, o := range obs {
+		u := o.Util
+		n := EntryNote{Util: &u}
+		if !o.ResetsAt.IsZero() {
+			n.Resets = o.ResetsAt.Unix()
+		}
+		e.Windows[o.Window] = n
+	}
+	return e
 }
 
 // EntryNote is one window as seen by a request: the utilization its response headers reported
@@ -235,6 +252,9 @@ func Summarise(entries []Entry, since, until time.Time) Stats {
 	}
 	byAccount := map[string][]Entry{}
 	for _, e := range entries {
+		if e.Poll {
+			continue
+		}
 		if st.LogFrom.IsZero() {
 			st.LogFrom = e.At
 		}
