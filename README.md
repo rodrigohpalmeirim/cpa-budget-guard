@@ -112,7 +112,8 @@ on older versions every write is priced as 5-minute.
 ## Status API
 
 - `GET /v0/management/budget-guard/status`: JSON with every key's standing per window, every account's
-  windows, and calibration state. Requires the management key.
+  windows, and calibration state. Each account window also lists the budgeted keys' cost in its current
+  period (`key_cost_usd`), which is what its reset frees up. Requires the management key.
 - `GET /v0/management/budget-guard/stats?period=1h|5h|24h|7d|30d|90d`: the request log summarised (see above).
 - `/v0/resource/plugins/budget-guard/status`: the web page. It's static HTML; CLIProxyAPI serves
   plugin resources without authentication, so the page fetches all data from the endpoint above.

@@ -3,6 +3,7 @@ package guard
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"net/http"
 	"os"
@@ -605,6 +606,8 @@ type AccountWindowState struct {
 	CapacityUSD float64   `json:"capacity_usd"`
 	Quality     string    `json:"calibration"`
 	Segments    int       `json:"segments"`
+	// KeyCost is each budgeted key's cost in the current period: what frees up at this reset.
+	KeyCost map[string]float64 `json:"key_cost_usd,omitempty"`
 }
 
 // Snapshot builds the status report.
@@ -661,8 +664,12 @@ func (e *Engine) Snapshot() Status {
 			w := a.Windows[wid]
 			w.expire(now)
 			c, q := a.Capacity(wid)
-			as.Windows = append(as.Windows, AccountWindowState{Window: wid, Scope: w.Scope, Util: w.EffectiveUtil(now),
-				ResetsAt: w.ResetsAt, ObservedAt: w.ObservedAt, ProxyCost: w.ProxyCost, CapacityUSD: c, Quality: q, Segments: len(w.Segments)})
+			ws := AccountWindowState{Window: wid, Scope: w.Scope, Util: w.EffectiveUtil(now),
+				ResetsAt: w.ResetsAt, ObservedAt: w.ObservedAt, ProxyCost: w.ProxyCost, CapacityUSD: c, Quality: q, Segments: len(w.Segments)}
+			if w.Active(now) && len(w.KeyCost) > 0 {
+				ws.KeyCost = maps.Clone(w.KeyCost) // as poolWindowLocked counts it
+			}
+			as.Windows = append(as.Windows, ws)
 		}
 		st.Accounts = append(st.Accounts, as)
 	}

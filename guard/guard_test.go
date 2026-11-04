@@ -207,6 +207,23 @@ func TestOwnShareBlocksAndFrees(t *testing.T) {
 	if blockedAt < 25 || blockedAt > 36 {
 		t.Fatalf("laptop blocked after %d requests, want ~30", blockedAt)
 	}
+	// The status shows what each account's reset frees: laptop's cost sits on acct-1's 5h window.
+	var acctCost, ownCost float64
+	for _, a := range e.Snapshot().Accounts {
+		for _, w := range a.Windows {
+			if w.Window == "5h" {
+				acctCost += w.KeyCost["laptop"]
+			}
+		}
+	}
+	for _, k := range e.Snapshot().Keys {
+		if k.Name == "laptop" {
+			ownCost = k.Providers[0].Windows[0].OwnCostUSD
+		}
+	}
+	if acctCost <= 0 || math.Abs(acctCost-ownCost) > 1e-9 {
+		t.Fatalf("account key cost %v, own cost %v", acctCost, ownCost)
+	}
 	// Unknown keys are never limited.
 	if !e.Check(CallerScope("sk-admin"), "claude-opus-5-5").Allow {
 		t.Fatal("unbudgeted key blocked")
