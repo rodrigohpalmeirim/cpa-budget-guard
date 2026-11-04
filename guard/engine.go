@@ -285,6 +285,10 @@ type Usage struct {
 	Tokens   Tokens
 	Headers  http.Header
 	Failed   bool
+	// Session and ParentSession are the client session ids the host attaches (a Claude Code
+	// subagent has its parent's as ParentSession). Only short hashes reach the request log.
+	Session       string
+	ParentSession string
 }
 
 // HandleUsage books a finished request: cost per window, and the headers' utilization readings.
@@ -314,7 +318,11 @@ func (e *Engine) HandleUsage(u Usage) (entry Entry, ok bool) {
 	cost := Cost(e.cfg.Pricing, a.Provider, u.Model, u.Tokens)
 	entry = Entry{At: now, Key: keyName, Provider: a.Provider, Account: a.ID, Model: u.Model, Failed: u.Failed,
 		Input: u.Tokens.Input, Output: u.Tokens.Output, Cached: u.Tokens.Cached, CacheRead: u.Tokens.CacheRead,
-		CacheWrite: u.Tokens.CacheCreate, CacheWrite1h: u.Tokens.CacheCreate1h, Cost: cost, Windows: map[string]EntryNote{}}
+		CacheWrite: u.Tokens.CacheCreate, CacheWrite1h: u.Tokens.CacheCreate1h, Cost: cost, Windows: map[string]EntryNote{},
+		Session: SessionHash(u.Session)}
+	if u.ParentSession != u.Session {
+		entry.Parent = SessionHash(u.ParentSession)
+	}
 	for _, o := range obs {
 		u := o.Util
 		n := entry.Windows[o.Window]

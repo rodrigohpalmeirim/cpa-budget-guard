@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -113,6 +114,21 @@ func TestHandleUsageReturnsEntry(t *testing.T) {
 	n := entry.Windows["5h"]
 	if n.Util == nil || math.Abs(*n.Util-42) > 1e-9 || n.Resets != 1800010000 || !n.Booked || n.Quality != QualityNone {
 		t.Fatalf("5h note %+v", n)
+	}
+}
+
+func TestEntrySessionHashes(t *testing.T) {
+	e := NewEngine(func() time.Time { return time.Unix(1_800_000_000, 0) })
+	e.Configure(Config{})
+	main, _ := e.HandleUsage(Usage{AuthID: "acct", Provider: "claude", Model: "claude-opus-5-5",
+		Session: "claude:abc", ParentSession: "claude:abc"})
+	sub, _ := e.HandleUsage(Usage{AuthID: "acct", Provider: "claude", Model: "claude-opus-5-5",
+		Session: "claude:abc:agent:1", ParentSession: "claude:abc"})
+	if main.Session == "" || main.Parent != "" || len(main.Session) != 12 {
+		t.Fatalf("main session %+v", main)
+	}
+	if sub.Parent != main.Session || sub.Session == main.Session || strings.Contains(sub.Session, "abc") {
+		t.Fatalf("subagent %q of %q, main %q", sub.Session, sub.Parent, main.Session)
 	}
 }
 

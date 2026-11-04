@@ -98,6 +98,8 @@ type usageRecord struct {
 	AuthID          string
 	AuthIndex       string
 	Failed          bool
+	SessionID       string
+	ParentSessionID string
 	Detail          usageDetail
 	ResponseHeaders http.Header
 }
@@ -373,7 +375,7 @@ func handleUsage(raw []byte) {
 	}
 	entry, ok := engine.HandleUsage(guard.Usage{
 		APIKey: rec.APIKey, AuthID: rec.AuthID, Provider: rec.Provider, Model: rec.Model, Failed: rec.Failed,
-		Headers: rec.ResponseHeaders,
+		Headers: rec.ResponseHeaders, Session: rec.SessionID, ParentSession: rec.ParentSessionID,
 		Tokens: guard.Tokens{Input: rec.Detail.InputTokens, Output: rec.Detail.OutputTokens, Cached: rec.Detail.CachedTokens,
 			CacheRead: rec.Detail.CacheReadTokens, CacheCreate: rec.Detail.CacheCreationTokens,
 			CacheCreate1h: deref(rec.Detail.CacheCreation1hTokens)},
