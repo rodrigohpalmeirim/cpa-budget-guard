@@ -26,7 +26,14 @@ type Account struct {
 	// learned from how both utilizations rise together (valid even with usage outside the proxy).
 	Ratios    map[string]*Ratio `json:"ratios,omitempty"`
 	LastPairs map[string]*Pair  `json:"last_pairs,omitempty"` // per observation source
+	// Unreported counts the polls in a row that left out a window this account has.
+	Unreported map[string]int `json:"unreported,omitempty"`
 }
+
+// dropAfterPolls is how many polls in a row must leave a window out before it is dropped: a plan
+// can lose a limit (a verified account stops reporting its 5-hour window), and one odd response
+// shouldn't cost a calibrated window.
+const dropAfterPolls = 2
 
 // Ratio accumulates simultaneous utilization rises of the base window and another window.
 type Ratio struct {
@@ -178,7 +185,47 @@ func (e *Engine) providerForModelLocked(model string) string {
 func (e *Engine) ApplyObservations(accountID, provider string, obs []Observation) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.applyLocked(e.account(accountID, provider), obs, SourcePoll, e.now())
+	a := e.account(accountID, provider)
+	e.applyLocked(a, obs, SourcePoll, e.now())
+	e.dropUnreportedLocked(a, obs)
+}
+
+// dropUnreportedLocked forgets windows the usage endpoint reported before and now keeps leaving
+// out: the account no longer has that limit. Windows only response headers carry are left alone.
+func (e *Engine) dropUnreportedLocked(a *Account, obs []Observation) {
+	if len(obs) == 0 {
+		return
+	}
+	seen := map[string]bool{}
+	for _, o := range obs {
+		seen[o.Window] = true
+	}
+	for id, w := range a.Windows {
+		if seen[id] || !w.Polled {
+			delete(a.Unreported, id)
+			continue
+		}
+		if a.Unreported == nil {
+			a.Unreported = map[string]int{}
+		}
+		if a.Unreported[id]++; a.Unreported[id] < dropAfterPolls {
+			continue
+		}
+		delete(a.Windows, id)
+		delete(a.Unreported, id)
+		delete(a.Ratios, id)
+		for oid, r := range a.Ratios {
+			if r.Base == id {
+				delete(a.Ratios, oid)
+			}
+		}
+		// The base window may have changed, so earlier pairs no longer line up.
+		a.LastPairs = nil
+		e.dirty = true
+	}
+	if len(a.Unreported) == 0 {
+		a.Unreported = nil
+	}
 }
 
 func (e *Engine) applyLocked(a *Account, obs []Observation, source string, now time.Time) {
@@ -187,7 +234,9 @@ func (e *Engine) applyLocked(a *Account, obs []Observation, source string, now t
 	}
 	for i := range obs {
 		obs[i].Source = source
-		if a.window(obs[i]).Observe(obs[i], now, e.cfg.CalibrationStep) {
+		w := a.window(obs[i])
+		w.Polled = w.Polled || source == SourcePoll
+		if w.Observe(obs[i], now, e.cfg.CalibrationStep) {
 			// A plan change moves every window of the account, including ones idle right now.
 			a.Ratios, a.LastPairs = nil, nil
 			for _, w := range a.Windows {
@@ -521,6 +570,47 @@ func (e *Engine) appliesLocked(provider, window, model string) bool {
 	return false
 }
 
+// uncappedLocked lists the provider's accounts that have no such limit. While one exists the
+// window can't stop the pool (that account keeps serving), so budgets on it aren't enforced.
+// Only the usage endpoint can tell: the window must be one it reports for some account, and
+// the account must have been polled without it. Windows only response headers carry never count.
+func (e *Engine) uncappedLocked(provider, window string) []string {
+	reported := false
+	for _, a := range e.accounts {
+		if w := a.Windows[window]; a.Provider == provider && !a.Disabled && w != nil && w.Polled {
+			reported = true
+		}
+	}
+	if !reported {
+		return nil
+	}
+	var out []string
+	for _, id := range sortedKeys(e.accounts) {
+		a := e.accounts[id]
+		if a.Provider != provider || a.Disabled || a.Windows[window] != nil || !a.polled() {
+			continue
+		}
+		out = append(out, a.label())
+	}
+	return out
+}
+
+func (a *Account) polled() bool {
+	for _, w := range a.Windows {
+		if w.Polled {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *Account) label() string {
+	if a.Label != "" {
+		return a.Label
+	}
+	return a.ID
+}
+
 // Check decides whether a request from callerScope for model may proceed.
 func (e *Engine) Check(callerScope, model string) Decision {
 	e.mu.Lock()
@@ -538,6 +628,9 @@ func (e *Engine) Check(callerScope, model string) Decision {
 	for _, id := range e.windowsLocked(provider) {
 		if !e.appliesLocked(provider, id, model) {
 			continue // e.g. the Fable weekly limit doesn't apply to an Opus request
+		}
+		if len(e.uncappedLocked(provider, id)) > 0 {
+			continue // an account without this limit can always serve the request
 		}
 		ownLimit, hasOwn := limitFor(b.OwnShare, id)
 		ceiling, hasCeil := limitFor(b.PoolCeiling, id)
@@ -574,6 +667,8 @@ type PoolWindow struct {
 	Window    string `json:"window"`
 	Scope     string `json:"scope,omitempty"`
 	LengthSec int64  `json:"length_sec,omitempty"`
+	// Uncapped lists accounts without this limit; while there are any, budgets on it aren't enforced.
+	Uncapped []string `json:"uncapped,omitempty"`
 }
 
 // Version is reported in the status (set by the plugin wrapper).
@@ -594,6 +689,8 @@ type KeyWindowStatus struct {
 	OwnLimit    *float64 `json:"own_share_limit,omitempty"`
 	PoolCeiling *float64 `json:"pool_ceiling,omitempty"`
 	Blocked     bool     `json:"blocked"`
+	// Unenforced: some account has no such limit, so the window's budgets don't block.
+	Unenforced bool `json:"unenforced,omitempty"`
 }
 
 type AccountStatus struct {
@@ -630,7 +727,7 @@ func (e *Engine) Snapshot() Status {
 	}
 	for _, provider := range sortedKeys(providers) {
 		for _, id := range e.windowsLocked(provider) {
-			pw := PoolWindow{Provider: provider, Window: id}
+			pw := PoolWindow{Provider: provider, Window: id, Uncapped: e.uncappedLocked(provider, id)}
 			for _, a := range e.accounts {
 				if w := a.Windows[id]; a.Provider == provider && w != nil {
 					pw.Scope, pw.LengthSec = w.Scope, w.LengthSec
@@ -650,7 +747,7 @@ func (e *Engine) Snapshot() Status {
 				if !ok {
 					continue
 				}
-				ws := KeyWindowStatus{WindowUsage: wu}
+				ws := KeyWindowStatus{WindowUsage: wu, Unenforced: len(e.uncappedLocked(provider, id)) > 0}
 				if v, ok := limitFor(b.OwnShare, id); ok {
 					ws.OwnLimit = &v
 					ws.Blocked = ws.Blocked || (wu.OwnKnown && wu.OwnShare >= v)
@@ -659,6 +756,7 @@ func (e *Engine) Snapshot() Status {
 					ws.PoolCeiling = &v
 					ws.Blocked = ws.Blocked || wu.PoolUtil >= v
 				}
+				ws.Blocked = ws.Blocked && !ws.Unenforced
 				ps.Windows = append(ps.Windows, ws)
 			}
 			ks.Providers = append(ks.Providers, ps)

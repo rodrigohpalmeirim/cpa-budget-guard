@@ -431,3 +431,101 @@ func TestPlanUpgradeIsAcceptedAndRecalibrates(t *testing.T) {
 	}
 	near(t, "5h capacity after upgrade", cap5, 1000, 100)
 }
+
+func TestWindowLeftOutOfPollsIsDropped(t *testing.T) {
+	e, c := testEngine(t, "keys: [{name: laptop, key: sk-laptop}]")
+	both := []Observation{
+		{Window: "5h", Util: 10, ResetsAt: t0.Add(3 * time.Hour), LengthSec: 5 * 3600},
+		{Window: "7d", Util: 20, ResetsAt: t0.Add(72 * time.Hour), LengthSec: 7 * 86400},
+	}
+	weekly := func() []Observation {
+		return []Observation{{Window: "7d", Util: 21, ResetsAt: t0.Add(72 * time.Hour), LengthSec: 7 * 86400}}
+	}
+	e.ApplyObservations("acct-1", "claude", both)
+	a := e.accounts["acct-1"]
+	a.Windows["5h:fable"] = &Window{ID: "5h:fable", Scope: "header:fable", LengthSec: 5 * 3600}
+	a.Ratios = map[string]*Ratio{"7d": {Base: "5h", BaseU: 10, OthU: 2}}
+
+	c.add(3 * time.Minute)
+	e.ApplyObservations("acct-1", "claude", weekly())
+	if a.Windows["5h"] == nil {
+		t.Fatal("dropped after a single poll without it")
+	}
+	// Seen again: the count starts over.
+	e.ApplyObservations("acct-1", "claude", both)
+	e.ApplyObservations("acct-1", "claude", weekly())
+	if a.Windows["5h"] == nil {
+		t.Fatal("misses that weren't in a row added up")
+	}
+	e.ApplyObservations("acct-1", "claude", weekly())
+	if a.Windows["5h"] != nil {
+		t.Fatal("5h still tracked after two polls in a row left it out")
+	}
+	if a.Windows["5h:fable"] == nil {
+		t.Fatal("a header-only window was dropped")
+	}
+	if a.Windows["7d"] == nil || a.Ratios["7d"] != nil || a.Unreported != nil {
+		t.Fatalf("leftovers: 7d=%v ratios=%v unreported=%v", a.Windows["7d"], a.Ratios, a.Unreported)
+	}
+	if _, q := a.Capacity("5h"); q != QualityNone {
+		t.Fatalf("capacity for a dropped window: %s", q)
+	}
+	// An empty or failed poll says nothing.
+	e.ApplyObservations("acct-1", "claude", nil)
+	if a.Windows["7d"] == nil {
+		t.Fatal("an empty poll dropped windows")
+	}
+}
+
+func TestHeaderOnlyWindowIsNotDropped(t *testing.T) {
+	e, _ := testEngine(t, "keys: []")
+	// Codex: the response headers carry a weekly window its usage endpoint never lists.
+	e.ApplyObservations("cx", "codex", []Observation{{Window: "30d", Util: 1, LengthSec: 30 * 86400}})
+	e.mu.Lock()
+	e.applyLocked(e.account("cx", "codex"), []Observation{{Window: "7d", Util: 3, LengthSec: 7 * 86400}}, SourceHeader, e.now())
+	e.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		e.ApplyObservations("cx", "codex", []Observation{{Window: "30d", Util: 1, LengthSec: 30 * 86400}})
+	}
+	if e.accounts["cx"].Windows["7d"] == nil {
+		t.Fatal("a window only headers report was dropped by polls")
+	}
+}
+
+func TestWindowSomeAccountLacksIsNotEnforced(t *testing.T) {
+	e, _ := testEngine(t, "keys: [{name: laptop, key: sk-laptop, budgets: {claude: {pool_ceiling: {5h: 50, 7d: 50}}}}]")
+	reset := t0.Add(2 * time.Hour)
+	full := []Observation{
+		{Window: "5h", Util: 90, ResetsAt: reset, LengthSec: 5 * 3600},
+		{Window: "7d", Util: 10, ResetsAt: t0.Add(72 * time.Hour), LengthSec: 7 * 86400},
+	}
+	e.ApplyObservations("capped", "claude", full)
+	laptop := CallerScope("sk-laptop")
+	if d := e.Check(laptop, "claude-opus-5-5"); d.Allow || d.Window != "5h" {
+		t.Fatalf("5h ceiling not enforced while every account has the limit: %+v", d)
+	}
+	// A second account reports no 5-hour limit: it can serve anything the first can't.
+	e.ApplyObservations("open", "claude", []Observation{{Window: "7d", Util: 10, ResetsAt: t0.Add(96 * time.Hour), LengthSec: 7 * 86400}})
+	if d := e.Check(laptop, "claude-opus-5-5"); !d.Allow {
+		t.Fatalf("blocked on a window one account doesn't have: %+v", d)
+	}
+	st := e.Snapshot()
+	for _, w := range st.Windows {
+		if w.Provider == "claude" && w.Window == "5h" && (len(w.Uncapped) != 1 || w.Uncapped[0] != "open") {
+			t.Fatalf("5h uncapped = %v", w.Uncapped)
+		}
+		if w.Window == "7d" && len(w.Uncapped) != 0 {
+			t.Fatalf("7d uncapped = %v", w.Uncapped)
+		}
+	}
+	for _, kw := range st.Keys[0].Providers[0].Windows {
+		if kw.Window == "5h" && (!kw.Unenforced || kw.Blocked) {
+			t.Fatalf("5h status: unenforced=%v blocked=%v", kw.Unenforced, kw.Blocked)
+		}
+	}
+	// The limit comes back on that account: enforced again.
+	e.ApplyObservations("open", "claude", full)
+	if d := e.Check(laptop, "claude-opus-5-5"); d.Allow {
+		t.Fatal("5h not enforced again once every account has it")
+	}
+}

@@ -52,6 +52,11 @@ both rise together.
 Own share is only **enforced** once capacity is calibrated (3 or more segments). Until then the page
 shows "calibrating" and only pool ceilings apply.
 
+A window only limits the pool when every account has it. If an account's usage endpoint stops
+reporting a window (a plan without a 5-hour limit, say), the window is dropped from that account
+after two polls in a row, and while any account lacks it, budgets on it aren't enforced: that
+account can always serve the request. The status and the page mark such windows "not enforced".
+
 ## Install
 
 Requires CLIProxyAPI v8 with plugin support. It was built against v8.0.48, plugin C ABI v1, RPC

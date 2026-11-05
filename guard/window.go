@@ -47,6 +47,9 @@ type Window struct {
 	Util       float64         `json:"util"`
 	ResetsAt   time.Time       `json:"resets_at"`
 	ObservedAt time.Time       `json:"observed_at"`
+	// Polled: the usage endpoint reports this window. Only such windows can tell that an account
+	// lost a limit (Codex headers carry windows its usage endpoint never lists).
+	Polled bool `json:"polled,omitempty"`
 
 	// Accounting for the current period (since the last reset).
 	PeriodStart time.Time          `json:"period_start"`
