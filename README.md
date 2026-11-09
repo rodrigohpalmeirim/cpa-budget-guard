@@ -120,6 +120,12 @@ on older versions every write is priced as 5-minute.
   windows, and calibration state. Each account window also lists the budgeted keys' cost in its current
   period (`key_cost_usd`), which is what its reset frees up. Requires the management key.
 - `GET /v0/management/budget-guard/stats?period=1h|5h|24h|7d|30d|90d`: the request log summarised (see above).
+- `GET /v0/management/budget-guard/costs?period=24h|7d|30d|90d&step=300|900|3600`: the spend in the
+  request log, for charting. `rows` hold one time bucket and combination of key, model, account and
+  agent (main thread or subagent) each, with tokens and cost per billing type (input, output, cache
+  reads, cache writes, 1-hour cache writes) and what the requests would have cost with no caching;
+  `columns` names the fields. Also the previous period's totals per key, and the costliest
+  conversations (a session with the subagents it started, from the hashed session ids).
 - `/v0/resource/plugins/budget-guard/status`: the web page. It's static HTML; CLIProxyAPI serves
   plugin resources without authentication, so the page fetches all data from the endpoint above.
 

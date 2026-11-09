@@ -56,23 +56,62 @@ func priceFor(rules []PriceRule, provider, model string) PriceRule {
 	return defaultPricing[len(defaultPricing)-1]
 }
 
-// Cost returns the API-equivalent USD cost of a request, used as the unit of "work".
-func Cost(rules []PriceRule, provider, model string, t Tokens) float64 {
+// Billing types, in the order Breakdown and the costs report list them.
+const (
+	TypeInput = iota // uncached input
+	TypeOutput
+	TypeCacheRead
+	TypeCacheWrite   // 5-minute cache writes (all writes when the host doesn't report the TTL split)
+	TypeCacheWrite1h // 1-hour cache writes
+	NumTypes
+)
+
+// TypeNames names the billing types for the costs report.
+var TypeNames = [NumTypes]string{"input", "output", "cache_read", "cache_write", "cache_write_1h"}
+
+// Breakdown is a request's tokens and cost per billing type, and what it would have cost with no
+// prompt caching (every prompt token billed as plain input).
+type Breakdown struct {
+	Tokens  [NumTypes]int64
+	Cost    [NumTypes]float64
+	NoCache float64
+}
+
+// Total is the sum of the per-type costs.
+func (b Breakdown) Total() float64 {
+	var s float64
+	for _, c := range b.Cost {
+		s += c
+	}
+	return s
+}
+
+// Split prices a request per billing type.
+func Split(rules []PriceRule, provider, model string, t Tokens) Breakdown {
 	p := priceFor(rules, provider, model)
 	perTok := func(price float64, n int64) float64 { return price * float64(n) / 1e6 }
+	var b Breakdown
 	if provider == "claude" {
 		long := min(max(t.CacheCreate1h, 0), t.CacheCreate)
-		return perTok(p.Input, t.Input) + perTok(p.Output, t.Output) + perTok(p.CacheRead, t.CacheRead) +
-			perTok(p.CacheWrite, t.CacheCreate-long) + perTok(p.cacheWrite1h(), long)
+		b.Tokens = [NumTypes]int64{t.Input, t.Output, t.CacheRead, t.CacheCreate - long, long}
+		b.Cost = [NumTypes]float64{perTok(p.Input, t.Input), perTok(p.Output, t.Output), perTok(p.CacheRead, t.CacheRead),
+			perTok(p.CacheWrite, t.CacheCreate-long), perTok(p.cacheWrite1h(), long)}
+	} else {
+		cached := t.Cached
+		if cached == 0 {
+			cached = t.CacheRead
+		}
+		uncached := max(t.Input-cached, 0)
+		b.Tokens = [NumTypes]int64{uncached, t.Output, cached, t.CacheCreate, 0}
+		b.Cost = [NumTypes]float64{perTok(p.Input, uncached), perTok(p.Output, t.Output), perTok(p.CacheRead, cached),
+			perTok(p.CacheWrite, t.CacheCreate), 0}
 	}
-	cached := t.Cached
-	if cached == 0 {
-		cached = t.CacheRead
-	}
-	uncached := t.Input - cached
-	if uncached < 0 {
-		uncached = 0
-	}
-	return perTok(p.Input, uncached) + perTok(p.CacheRead, cached) + perTok(p.Output, t.Output) +
-		perTok(p.CacheWrite, t.CacheCreate)
+	prompt := b.Tokens[TypeInput] + b.Tokens[TypeCacheRead] + b.Tokens[TypeCacheWrite] + b.Tokens[TypeCacheWrite1h]
+	b.NoCache = perTok(p.Input, prompt) + b.Cost[TypeOutput]
+	return b
+}
+
+// Cost returns the API-equivalent USD cost of a request, used as the unit of "work".
+func Cost(rules []PriceRule, provider, model string, t Tokens) float64 {
+	return Split(rules, provider, model, t).Total()
 }

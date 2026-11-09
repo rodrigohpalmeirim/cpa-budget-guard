@@ -174,10 +174,14 @@ table.edit td.w { width:130px; }
 .seg button + button { border-left:1px solid var(--border-color); }
 .seg button.on { background:var(--bg-tertiary); color:var(--text-primary); }
 .usage { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,520px),1fr)); gap:14px; }
+.agent-row { display:flex; align-items:center; justify-content:space-between; gap:8px 12px; flex-wrap:wrap; margin-bottom:14px; padding:10px 12px; border:1px solid var(--border-color); border-radius:10px; }
 table.stats { width:100%; border-collapse:collapse; font-size:13px; }
 table.stats th { text-align:right; font-size:12px; font-weight:600; color:var(--text-tertiary); padding:5px 8px; border-bottom:1px solid var(--border-color); white-space:nowrap; }
 table.stats td { text-align:right; padding:5px 8px; border-bottom:1px solid color-mix(in srgb,var(--border-color) 60%,transparent); font-family:var(--mono); font-variant-numeric:tabular-nums; white-space:nowrap; }
 table.stats th:first-child, table.stats td:first-child { text-align:left; font-family:var(--font); overflow:hidden; text-overflow:ellipsis; max-width:220px; }
+/* Narrow screens: wide tables scroll inside their card rather than widening the page. */
+.usage > .card { min-width:0; }
+@media (max-width:700px) { table.stats { display:block; overflow-x:auto; } }
 table.stats td.warn { color:var(--quota-medium-color); } table.stats td.bad { color:var(--viz-failure); } table.stats td.good { color:var(--viz-success); }
 .pct { position:relative; } .pct::after { content:'%'; position:absolute; right:10px; top:50%; transform:translateY(-50%); color:var(--text-tertiary); pointer-events:none; }
 .pct .input { padding-right:26px; }
@@ -245,13 +249,18 @@ function panelKey() {
   } catch (e) { return ""; }
 }
 let mgmtKey = sessionStorage.getItem("budgetGuardKey") || panelKey();
+// Requests refused at the same time share one key prompt.
+let keyPrompt = null;
 async function api(method, path, body) {
   const headers = { "Accept": "application/json" };
-  if (mgmtKey) headers.Authorization = "Bearer " + mgmtKey;
+  const sentKey = mgmtKey;
+  if (sentKey) headers.Authorization = "Bearer " + sentKey;
   if (body !== undefined) headers["Content-Type"] = "application/json";
   const r = await fetch(path, { method, headers, credentials: "same-origin", body: body === undefined ? undefined : JSON.stringify(body) });
-  if (r.status === 401 || (r.status === 404 && !mgmtKey)) {
-    const k = await askKey();
+  if (r.status === 401 || (r.status === 404 && !sentKey)) {
+    if (mgmtKey && mgmtKey !== sentKey) return api(method, path, body); // a key was entered meanwhile
+    keyPrompt = keyPrompt || askKey().finally(() => { keyPrompt = null; });
+    const k = await keyPrompt;
     if (k) { mgmtKey = k; sessionStorage.setItem("budgetGuardKey", k); return api(method, path, body); }
   }
   const text = await r.text();
@@ -560,17 +569,47 @@ function deleteKey(idx) {
   });
 }
 
+// Instructions for a coding agent on the client machine (the same text as the panel's key editor).
+function agentPrompt(base, name, key, codexTable) {
+  return [
+    "Set up this machine to use a shared CLIProxyAPI pool for Claude Code and the Codex CLI.",
+    "",
+    `- Proxy: ${base}`,
+    `- API key (budget "${name}"): ${key}`,
+    "",
+    `The key is a secret, and everything sent with it counts against the "${name}" budget: use it only on this machine, and don't commit it, log it or paste it anywhere else.`,
+    "",
+    "Steps:",
+    "1. Check which of `claude` (Claude Code) and `codex` (Codex CLI) are installed. Configure only those; if neither is, say so and stop.",
+    "2. Check that the proxy accepts the key:",
+    `   curl -sS ${base}/v1/models -H "Authorization: Bearer ${key}"`,
+    "   It should return a JSON list of models. If it doesn't, stop and report the error. (On Windows, use curl.exe.)",
+    "3. Claude Code: in ~/.claude/settings.json (on Windows %USERPROFILE%\\.claude\\settings.json), set these two entries under \"env\", keeping every other setting. Back the file up first if it exists; create it if it doesn't.",
+    `   "ANTHROPIC_BASE_URL": "${base}"`,
+    `   "ANTHROPIC_AUTH_TOKEN": "${key}"`,
+    "   If ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY is also set in the environment or a shell profile, tell me where instead of changing it.",
+    "4. Codex CLI: in ~/.codex/config.toml (back it up first if it exists), set `model_provider = \"cliproxy\"` at the top level, before any [table], replacing any other model_provider line. Then add this table, keeping everything else:",
+    ...codexTable.split("\n").map((l) => "   " + l),
+    "5. In a new shell, test each tool you configured with a one-line request, e.g. `claude -p \"Reply with OK\"` and `codex exec \"Reply with OK\"`.",
+    "6. Tell me what you changed (files and backups) and how the tests went. Don't repeat the key in your summary.",
+  ].join("\n");
+}
+
 function connect(idx) {
   const k = cfg.keys[idx], base = location.origin;
   const snip = (s) => `<pre class="snippet"><button class="btn btn-secondary btn-sm" data-copy="${esc(s)}">${ICON.copy}Copy</button>${esc(s)}</pre>`;
   const claude = `export ANTHROPIC_BASE_URL=${base}\nexport ANTHROPIC_AUTH_TOKEN=${k.key}`;
   const claudeJson = JSON.stringify({ env: { ANTHROPIC_BASE_URL: base, ANTHROPIC_AUTH_TOKEN: k.key } }, null, 2);
-  const codex = `# ~/.codex/config.toml\nmodel_provider = "cpa"\n\n[model_providers.cpa]\nname = "CLIProxyAPI"\nbase_url = "${base}/v1"\nenv_key = "CPA_API_KEY"\nwire_api = "responses"`;
+  const codexTable = `[model_providers.cliproxy]\nname = "CLIProxyAPI"\nbase_url = "${base}/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nsupports_websockets = true\nexperimental_bearer_token = "${k.key}"`;
+  const codex = `# ~/.codex/config.toml\nmodel_provider = "cliproxy"\n\n${codexTable}`;
+  const prompt = agentPrompt(base, k.name, k.key, codexTable);
   const m = modal("Connect " + k.name,
     `<div class="hint" style="margin-bottom:12px">Use this key only on <b>${esc(k.name)}</b> so its usage is counted against its budget.</div>
+     <div class="agent-row"><span class="hint">Let an agent on that machine set it up, or copy the settings below.</span>
+       <button class="btn btn-secondary btn-sm" data-copy="${esc(prompt)}">${ICON.copy}Copy agent prompt</button></div>
      <label><b>Claude Code</b> — shell</label>${snip(claude)}
      <details><summary>or ~/.claude/settings.json</summary>${snip(claudeJson)}</details>
-     <label><b>Codex CLI</b></label>${snip(codex)}${snip("export CPA_API_KEY=" + k.key)}
+     <label><b>Codex CLI</b></label>${snip(codex)}
      <label><b>Any OpenAI-compatible client</b></label>${snip(`base URL: ${base}/v1\nAPI key:  ${k.key}`)}`,
     `<button class="btn btn-primary" data-close>Done</button>`);
   m.el.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", () => copy(b.dataset.copy)));
@@ -647,8 +686,19 @@ document.addEventListener("click", (e) => {
   ({ add: () => editKey(null), edit: () => editKey(i), delete: () => deleteKey(i), connect: () => connect(i), settings, refresh: () => load(),
     period: () => { period = b.dataset.p; sessionStorage.setItem("budgetGuardPeriod", period); stats = null; render(); load(true); } })[b.dataset.act]();
 });
+// Every 30s while visible, and on return to the page if the last load is over 10s old (ticks are
+// skipped while hidden). Not while a dialog is open.
+let lastAuto = Date.now(), autoTimer;
+function autoLoad() {
+  clearTimeout(autoTimer); autoTimer = setTimeout(autoLoad, 30000);
+  if (document.hidden || document.getElementById("modal-root").firstChild) return;
+  lastAuto = Date.now(); load(true);
+}
+function onShow() { if (!document.hidden && Date.now() - lastAuto > 10000) autoLoad(); }
+document.addEventListener("visibilitychange", onShow);
+window.addEventListener("focus", onShow);
 load();
-setInterval(() => { if (!document.getElementById("modal-root").firstChild && !document.hidden) load(true); }, 30000);
+autoTimer = setTimeout(autoLoad, 30000);
 </script>
 </body>
 </html>

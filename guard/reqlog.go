@@ -135,15 +135,25 @@ func (l *RequestLog) Close() {
 
 // Read returns the entries at or after since, oldest first.
 func (l *RequestLog) Read(since time.Time) ([]Entry, error) {
+	var out []Entry
+	if err := l.Scan(since, func(e Entry) { out = append(out, e) }); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].At.Before(out[j].At) })
+	return out, nil
+}
+
+// Scan calls fn for each entry at or after since, in file order (oldest day first, then as
+// appended), without holding them all in memory.
+func (l *RequestLog) Scan(since time.Time, fn func(Entry)) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	files, err := filepath.Glob(filepath.Join(l.dir, logPrefix+"*"+logSuffix))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	sort.Strings(files)
 	first := since.UTC().Format("2006-01-02")
-	var out []Entry
 	for _, f := range files {
 		day := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(f), logPrefix), logSuffix)
 		if day < first {
@@ -151,23 +161,22 @@ func (l *RequestLog) Read(since time.Time) ([]Entry, error) {
 		}
 		fh, err := os.Open(f)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		sc := bufio.NewScanner(fh)
 		sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
 		for sc.Scan() {
 			var e Entry
 			if json.Unmarshal(sc.Bytes(), &e) == nil && !e.At.Before(since) {
-				out = append(out, e)
+				fn(e)
 			}
 		}
 		_ = fh.Close()
 		if err := sc.Err(); err != nil {
-			return nil, fmt.Errorf("read %s: %w", f, err)
+			return fmt.Errorf("read %s: %w", f, err)
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].At.Before(out[j].At) })
-	return out, nil
+	return nil
 }
 
 // ---- statistics ----

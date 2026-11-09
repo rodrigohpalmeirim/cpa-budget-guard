@@ -153,6 +153,8 @@ func handleMethod(method string, req []byte) ([]byte, error) {
 					Description: "Per-key budget usage and per-account limit windows (JSON)."},
 				{Method: "GET", Path: "/budget-guard/stats",
 					Description: "Request log summary (?period=1h|5h|24h|7d|30d|90d): cost and cache use per key, account and model, and how well the capacity estimates explain the reported usage."},
+				{Method: "GET", Path: "/budget-guard/costs",
+					Description: "Spend breakdown for charting (?period=24h|7d|30d|90d, ?step=300|900|3600): tokens and cost per billing type by time bucket, key, model, account and agent, the previous period's totals, and the costliest conversations."},
 				{Method: "GET", Path: "/budget-guard/timeline",
 					Description: "One provider window over time (query: provider, window, hours): pool remaining per step, utilization per account, spend per key."},
 				{Method: "GET", Path: "/budget-guard/hub/auth-files",
@@ -419,6 +421,71 @@ func handleStats(req managementRequest) ([]byte, error) {
 	return jsonResponse(200, st)
 }
 
+var costsCache struct {
+	sync.Mutex
+	key  string
+	at   time.Time
+	body []byte
+}
+
+// handleCosts serves the spend breakdown. Reading a long log is slow, so a report is reused for
+// a minute.
+func handleCosts(req managementRequest) ([]byte, error) {
+	period := req.Query.Get("period")
+	if period == "" {
+		period = "24h"
+	}
+	d, ok := statsPeriods[period]
+	if !ok {
+		return jsonResponse(400, map[string]string{"error": "period must be one of 1h, 5h, 24h, 7d, 30d, 90d"})
+	}
+	step := time.Hour
+	if v := req.Query.Get("step"); v != "" {
+		n, _ := strconv.Atoi(v)
+		switch n {
+		case 300, 900, 3600:
+			step = time.Duration(n) * time.Second
+		default:
+			return jsonResponse(400, map[string]string{"error": "step must be 300, 900 or 3600"})
+		}
+	}
+	if d/step > 24*90 {
+		return jsonResponse(400, map[string]string{"error": "too many steps: use a longer step"})
+	}
+	lifeMu.Lock()
+	l := reqLog
+	lifeMu.Unlock()
+	if l == nil {
+		return jsonResponse(404, map[string]string{"error": "the request log is disabled (request_log_days: -1)"})
+	}
+	cacheKey := period + "/" + step.String()
+	costsCache.Lock()
+	defer costsCache.Unlock()
+	if costsCache.key == cacheKey && time.Since(costsCache.at) < time.Minute {
+		return costsResponse(costsCache.body)
+	}
+	labels := map[string]string{}
+	for _, a := range engine.Snapshot().Accounts {
+		labels[a.ID] = a.Label
+	}
+	now := time.Now()
+	b := guard.NewCostsBuilder(engine.Config().Pricing, now.Add(-d), now, step, labels)
+	if err := l.Scan(b.From(), b.Add); err != nil {
+		return jsonResponse(500, map[string]string{"error": err.Error()})
+	}
+	body, err := json.Marshal(b.Finish())
+	if err != nil {
+		return nil, err
+	}
+	costsCache.key, costsCache.at, costsCache.body = cacheKey, now, body
+	return costsResponse(body)
+}
+
+func costsResponse(body []byte) ([]byte, error) {
+	return okEnvelope(managementResponse{StatusCode: 200,
+		Headers: http.Header{"Content-Type": {"application/json"}, "Cache-Control": {"no-store"}}, Body: body})
+}
+
 // handleTimeline charts one provider window: GET ...?provider=claude&window=7d&hours=168.
 func handleTimeline(req managementRequest) ([]byte, error) {
 	provider, window := strings.ToLower(req.Query.Get("provider")), strings.ToLower(req.Query.Get("window"))
@@ -509,6 +576,9 @@ func handleManagement(raw []byte) ([]byte, error) {
 	}
 	if strings.HasPrefix(path, "/v0/management/") && strings.HasSuffix(path, "/budget-guard/timeline") {
 		return handleTimeline(req)
+	}
+	if strings.HasPrefix(path, "/v0/management/") && strings.HasSuffix(path, "/budget-guard/costs") {
+		return handleCosts(req)
 	}
 	if strings.HasPrefix(path, "/v0/management/") && strings.HasSuffix(path, "/budget-guard/stats") {
 		return handleStats(req)

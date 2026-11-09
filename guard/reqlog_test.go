@@ -184,3 +184,41 @@ func TestTimelinePoolRemainingAndSpend(t *testing.T) {
 		t.Fatalf("polls counted as requests: %d", st.Total.Requests)
 	}
 }
+
+func TestCostsBreakdown(t *testing.T) {
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	b := NewCostsBuilder(nil, now.Add(-24*time.Hour), now, time.Hour, map[string]string{"acct": "Alice"})
+	entry := func(at time.Time, key, sid, psid string, cost float64) Entry {
+		return Entry{At: at, Key: key, Provider: "claude", Account: "acct", Model: "claude-opus-5-5",
+			Input: 1000, Output: 1000, CacheRead: 100000, CacheWrite: 10000, Cost: cost, Session: sid, Parent: psid}
+	}
+	// opus-5-5: 1000*4 + 1000*20 + 100000*0.2 + 10000*5 = 94000 per million = $0.094.
+	b.Add(entry(now.Add(-30*time.Hour), "a", "s0", "", 0.094)) // previous period
+	b.Add(entry(now.Add(-2*time.Hour), "a", "s1", "", 0.094))
+	b.Add(entry(now.Add(-2*time.Hour+time.Minute), "a", "s2", "s1", 0.188)) // booked at twice the price
+	b.Add(entry(now.Add(-time.Hour), "b", "s3", "", 0.094))
+	b.Add(Entry{At: now.Add(-time.Hour), Poll: true})
+	c := b.Finish()
+	if len(c.Keys) != 2 || len(c.Accounts) != 1 || c.Accounts[0].Label != "Alice" || len(c.Rows) != 3 {
+		t.Fatalf("dims %v %v rows %v", c.Keys, c.Accounts, c.Rows)
+	}
+	sub := c.Rows[1] // bucket 22, key a, subagent
+	if sub[0] != 22 || sub[4] != 1 || sub[5] != 1 {
+		t.Fatalf("subagent row %v", sub)
+	}
+	// Parts are scaled to the booked cost: output is 20000/94000 of it.
+	if got := sub[6+NumTypes+TypeOutput]; math.Abs(got-0.188*20000/94000) > 1e-6 {
+		t.Fatalf("output cost %v", got)
+	}
+	// No caching: 111000 prompt tokens at $4 + output $0.02 = $0.464, doubled.
+	if got := sub[6+2*NumTypes]; math.Abs(got-2*0.464) > 1e-6 {
+		t.Fatalf("no-cache cost %v", got)
+	}
+	if p := c.Previous["a"]; p.Requests != 1 || math.Abs(p.Cost-0.094) > 1e-9 {
+		t.Fatalf("previous %+v", c.Previous)
+	}
+	if len(c.Conversations) != 2 || c.Conversations[0].ID != "s1" || c.Conversations[0].Subagents != 1 ||
+		c.Conversations[0].Requests != 2 || math.Abs(c.Conversations[0].SubCost-0.188) > 1e-9 {
+		t.Fatalf("conversations %+v", c.Conversations)
+	}
+}
