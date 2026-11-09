@@ -375,14 +375,25 @@ function header(meta) {
     <button class="btn btn-secondary" data-act="settings">${ICON.gear}Settings</button>
     <button class="btn btn-primary" data-act="add">${ICON.plus}Add key</button></div></div>`;
 }
-// Accounts without this limit (none: every account has it, so it's enforced).
+// Accounts without this limit that can serve now (none: it's enforced), and those of them out of
+// another limit (a weekly one at 100%), which don't lift it until they're back.
+function poolWindow(provider, window) {
+  return ((status && status.windows) || []).find((x) => x.provider === provider && x.window === window) || {};
+}
 function uncapped(provider, window) {
-  const w = ((status && status.windows) || []).find((x) => x.provider === provider && x.window === window);
-  return (w && w.uncapped) || [];
+  const w = poolWindow(provider, window), out = w.uncapped_out || [];
+  return (w.uncapped || []).filter((a) => !out.includes(a));
 }
 function offNote(provider, window) {
   const u = uncapped(provider, window);
   return u.length ? "Not enforced: " + u.join(", ") + (u.length > 1 ? " have" : " has") + " no such limit, so the pool can always serve from " + (u.length > 1 ? "them" : "it") + "." : "";
+}
+function outNote(provider, window) {
+  const w = poolWindow(provider, window), out = w.uncapped_out || [];
+  if (!out.length || uncapped(provider, window).length) return "";
+  const back = until(w.uncapped_back_at), many = out.length > 1;
+  return "Enforced while " + out.join(", ") + (many ? ", which have" : ", which has") + " no such limit, " + (many ? "are" : "is") +
+    " out of quota" + (back ? " (back in " + back + ")" : "") + ". Until then the pool can't serve from " + (many ? "them" : "it") + ".";
 }
 function isBlocked(k) { return !!(k && (k.providers || []).some((p) => (p.windows || []).some((w) => w.blocked))); }
 function keyCard(k, st, idx) {
@@ -400,10 +411,11 @@ function keyCard(k, st, idx) {
     groups += `<div class="group"><div class="group-title">${esc(PROVIDERS[provider] || provider)}</div>` +
       (rows.length ? rows.map((w) => {
         const free = w.blocked ? until(w.own_share_frees_at || w.pool_frees_at) : "";
-        const off = w.unenforced ? offNote(provider, w.window) : "";
+        const off = w.unenforced ? offNote(provider, w.window) : "", out = w.unenforced ? "" : outNote(provider, w.window);
         return `<div class="window${off ? " off" : ""}"><div class="window-head"><span>${esc(windowLabel(w.window))}</span>
           ${w.blocked ? `<span class="badge bad"><span class="pip"></span>blocked${free ? " · " + free : ""}</span>` : ""}
-          ${off ? `<span class="badge" title="${esc(off)}">not enforced</span>` : ""}</div>` +
+          ${off ? `<span class="badge" title="${esc(off)}">not enforced</span>` : ""}
+          ${out ? `<span class="badge" title="${esc(out)}">enforced for now</span>` : ""}</div>` +
           (w.own_share_limit != null ? meter("Own share", w.own_share_pct, w.own_share_limit, w.own_share_known, i++) : "") +
           (w.pool_ceiling != null ? meter("Pool", w.pool_util_pct, w.pool_ceiling, true, i++) : "") +
           `<div class="window-foot"><span>${usd(w.own_cost_usd)} used this window</span>${free ? `<span>frees in ${free}</span>` : ""}</div></div>`;
@@ -484,7 +496,7 @@ function editKey(idx) {
     const b = (orig.budgets || {})[p] || {}; const own = b.own_share || {}, ceil = b.pool_ceiling || {};
     const rows = pw[p].concat(["*"]);
     return `<table class="edit" data-p="${p}"><tr><th>Window</th><th>Own share</th><th>Pool ceiling</th></tr>` + rows.map((w) =>
-      `<tr><td>${esc(windowLabel(w))}${w === "*" ? '<div class="hint">fallback for windows without a value</div>' : ""}${w !== "*" && offNote(p, w) ? `<div class="hint">${esc(offNote(p, w))}</div>` : ""}</td>
+      `<tr><td>${esc(windowLabel(w))}${w === "*" ? '<div class="hint">fallback for windows without a value</div>' : ""}${w !== "*" && (offNote(p, w) || outNote(p, w)) ? `<div class="hint">${esc(offNote(p, w) || outNote(p, w))}</div>` : ""}</td>
         <td class="w"><div class="pct"><input class="input num" type="number" min="0" max="100" step="1" data-k="own" data-w="${esc(w)}" value="${own[w] ?? ""}" placeholder="–"></div></td>
         <td class="w"><div class="pct"><input class="input num" type="number" min="0" max="100" step="1" data-k="ceil" data-w="${esc(w)}" value="${ceil[w] ?? ""}" placeholder="–"></div></td></tr>`).join("") + `</table>`;
   };

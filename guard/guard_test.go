@@ -529,3 +529,54 @@ func TestWindowSomeAccountLacksIsNotEnforced(t *testing.T) {
 		t.Fatal("5h not enforced again once every account has it")
 	}
 }
+
+func TestUncappedAccountOutOfQuotaEnforcesAgain(t *testing.T) {
+	e, c := testEngine(t, "keys: [{name: laptop, key: sk-laptop, budgets: {claude: {pool_ceiling: {5h: 50}}}}]")
+	e.ApplyObservations("capped", "claude", []Observation{
+		{Window: "5h", Util: 90, ResetsAt: t0.Add(2 * time.Hour), LengthSec: 5 * 3600},
+		{Window: "7d", Util: 10, ResetsAt: t0.Add(72 * time.Hour), LengthSec: 7 * 86400},
+	})
+	back := t0.Add(time.Hour)
+	weekly := func(util, fable float64) []Observation {
+		return []Observation{
+			{Window: "7d", Util: util, ResetsAt: back, LengthSec: 7 * 86400},
+			{Window: "7d:fable", Scope: "model:fable", Util: fable, ResetsAt: back, LengthSec: 7 * 86400},
+		}
+	}
+	laptop := CallerScope("sk-laptop")
+	e.ApplyObservations("open", "claude", weekly(99, 0))
+	if d := e.Check(laptop, "claude-opus-5-5"); !d.Allow {
+		t.Fatalf("blocked while the account without the limit has room: %+v", d)
+	}
+	// Out of a model's weekly limit only: enforced for that model, not for others.
+	e.ApplyObservations("open", "claude", weekly(99, 100))
+	if d := e.Check(laptop, "claude-fable-5-1"); d.Allow || d.Window != "5h" {
+		t.Fatalf("5h not enforced for Fable while the uncapped account is out of Fable: %+v", d)
+	}
+	if d := e.Check(laptop, "claude-opus-5-5"); !d.Allow {
+		t.Fatalf("Opus blocked though the uncapped account can serve it: %+v", d)
+	}
+	if kw := e.Snapshot().Keys[0].Providers[0].Windows[0]; kw.Window != "5h" || !kw.Unenforced {
+		t.Fatalf("status counts a model limit as out of quota: %+v", kw)
+	}
+	// Out of its weekly limit it can't serve: the 5-hour budget applies until it's back.
+	e.ApplyObservations("open", "claude", weekly(100, 100))
+	d := e.Check(laptop, "claude-opus-5-5")
+	if d.Allow || d.Window != "5h" || !d.RetryAfter.Equal(back) {
+		t.Fatalf("5h not enforced while the uncapped account is out: %+v", d)
+	}
+	st := e.Snapshot()
+	for _, w := range st.Windows {
+		if w.Window == "5h" && (len(w.UncappedOut) != 1 || w.UncappedBackAt == nil || !w.UncappedBackAt.Equal(back)) {
+			t.Fatalf("5h out = %v back %v", w.UncappedOut, w.UncappedBackAt)
+		}
+	}
+	if kw := st.Keys[0].Providers[0].Windows[0]; kw.Window != "5h" || kw.Unenforced || !kw.Blocked {
+		t.Fatalf("5h status: %+v", kw)
+	}
+	// Once its weekly window resets it serves again.
+	c.t = back.Add(time.Minute)
+	if d := e.Check(laptop, "claude-opus-5-5"); !d.Allow {
+		t.Fatalf("blocked after the uncapped account's weekly reset: %+v", d)
+	}
+}

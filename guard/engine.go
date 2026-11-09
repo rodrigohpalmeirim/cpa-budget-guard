@@ -575,6 +575,14 @@ func (e *Engine) appliesLocked(provider, window, model string) bool {
 // Only the usage endpoint can tell: the window must be one it reports for some account, and
 // the account must have been polled without it. Windows only response headers carry never count.
 func (e *Engine) uncappedLocked(provider, window string) []string {
+	var out []string
+	for _, a := range e.uncappedAccountsLocked(provider, window) {
+		out = append(out, a.label())
+	}
+	return out
+}
+
+func (e *Engine) uncappedAccountsLocked(provider, window string) []*Account {
 	reported := false
 	for _, a := range e.accounts {
 		if w := a.Windows[window]; a.Provider == provider && !a.Disabled && w != nil && w.Polled {
@@ -584,15 +592,57 @@ func (e *Engine) uncappedLocked(provider, window string) []string {
 	if !reported {
 		return nil
 	}
-	var out []string
+	var out []*Account
 	for _, id := range sortedKeys(e.accounts) {
 		a := e.accounts[id]
 		if a.Provider != provider || a.Disabled || a.Windows[window] != nil || !a.polled() {
 			continue
 		}
-		out = append(out, a.label())
+		out = append(out, a)
 	}
 	return out
+}
+
+// openLocked splits the accounts without this limit (uncappedLocked) into those that can serve a
+// request for model now and those out of another limit that applies to it (a weekly window at
+// 100%). Only the first make the window's budgets moot; backAt is when the first of the others
+// can serve again (zero if unknown). model "" considers unscoped windows only.
+func (e *Engine) openLocked(provider, window, model string, now time.Time) (open, out []string, backAt time.Time) {
+	for _, a := range e.uncappedAccountsLocked(provider, window) {
+		var until time.Time
+		exhausted := false
+		for _, w := range a.Windows {
+			if !limitsModel(w, model) || w.EffectiveUtil(now) < 100 {
+				continue
+			}
+			exhausted = true
+			if w.ResetsAt.After(until) {
+				until = w.ResetsAt // it serves again once every exhausted window has reset
+			}
+		}
+		if !exhausted {
+			open = append(open, a.label())
+			continue
+		}
+		out = append(out, a.label())
+		if !until.IsZero() && (backAt.IsZero() || until.Before(backAt)) {
+			backAt = until
+		}
+	}
+	return open, out, backAt
+}
+
+// limitsModel reports whether an account window limits requests for model ("" = any model, so
+// only unscoped windows).
+func limitsModel(w *Window, model string) bool {
+	if w.Scope == "" {
+		return true
+	}
+	if model == "" {
+		return false
+	}
+	model = strings.ToLower(model)
+	return scopeMatches(w.Scope, model, nil) || w.Models[model]
 }
 
 func (a *Account) polled() bool {
@@ -629,8 +679,9 @@ func (e *Engine) Check(callerScope, model string) Decision {
 		if !e.appliesLocked(provider, id, model) {
 			continue // e.g. the Fable weekly limit doesn't apply to an Opus request
 		}
-		if len(e.uncappedLocked(provider, id)) > 0 {
-			continue // an account without this limit can always serve the request
+		open, _, backAt := e.openLocked(provider, id, model, now)
+		if len(open) > 0 {
+			continue // an account without this limit can serve the request
 		}
 		ownLimit, hasOwn := limitFor(b.OwnShare, id)
 		ceiling, hasCeil := limitFor(b.PoolCeiling, id)
@@ -641,11 +692,18 @@ func (e *Engine) Check(callerScope, model string) Decision {
 		if !ok {
 			continue
 		}
+		// An account without this limit that is out of another one lifts the budget when it's back.
+		retry := func(at time.Time) time.Time {
+			if !backAt.IsZero() && (at.IsZero() || backAt.Before(at)) {
+				return backAt
+			}
+			return at
+		}
 		if hasOwn && wu.OwnKnown && wu.OwnShare >= ownLimit {
-			return Decision{Key: k.Name, Provider: provider, Window: id, Kind: "own_share", Used: wu.OwnShare, Limit: ownLimit, RetryAfter: wu.OwnFreesAt}
+			return Decision{Key: k.Name, Provider: provider, Window: id, Kind: "own_share", Used: wu.OwnShare, Limit: ownLimit, RetryAfter: retry(wu.OwnFreesAt)}
 		}
 		if hasCeil && wu.PoolUtil >= ceiling {
-			return Decision{Key: k.Name, Provider: provider, Window: id, Kind: "pool_ceiling", Used: wu.PoolUtil, Limit: ceiling, RetryAfter: wu.PoolFreesAt}
+			return Decision{Key: k.Name, Provider: provider, Window: id, Kind: "pool_ceiling", Used: wu.PoolUtil, Limit: ceiling, RetryAfter: retry(wu.PoolFreesAt)}
 		}
 	}
 	return Decision{Allow: true, Key: k.Name, Provider: provider}
@@ -667,8 +725,12 @@ type PoolWindow struct {
 	Window    string `json:"window"`
 	Scope     string `json:"scope,omitempty"`
 	LengthSec int64  `json:"length_sec,omitempty"`
-	// Uncapped lists accounts without this limit; while there are any, budgets on it aren't enforced.
-	Uncapped []string `json:"uncapped,omitempty"`
+	// Uncapped lists accounts without this limit; while one of them can serve, budgets on it aren't
+	// enforced. UncappedOut are those of them out of another limit (a weekly one at 100%) and
+	// UncappedBackAt when the first of those serves again.
+	Uncapped       []string   `json:"uncapped,omitempty"`
+	UncappedOut    []string   `json:"uncapped_out,omitempty"`
+	UncappedBackAt *time.Time `json:"uncapped_back_at,omitempty"`
 }
 
 // Version is reported in the status (set by the plugin wrapper).
@@ -689,7 +751,7 @@ type KeyWindowStatus struct {
 	OwnLimit    *float64 `json:"own_share_limit,omitempty"`
 	PoolCeiling *float64 `json:"pool_ceiling,omitempty"`
 	Blocked     bool     `json:"blocked"`
-	// Unenforced: some account has no such limit, so the window's budgets don't block.
+	// Unenforced: an account with no such limit can serve, so the window's budgets don't block.
 	Unenforced bool `json:"unenforced,omitempty"`
 }
 
@@ -728,6 +790,12 @@ func (e *Engine) Snapshot() Status {
 	for _, provider := range sortedKeys(providers) {
 		for _, id := range e.windowsLocked(provider) {
 			pw := PoolWindow{Provider: provider, Window: id, Uncapped: e.uncappedLocked(provider, id)}
+			if _, out, back := e.openLocked(provider, id, "", now); len(out) > 0 {
+				pw.UncappedOut = out
+				if !back.IsZero() {
+					pw.UncappedBackAt = &back
+				}
+			}
 			for _, a := range e.accounts {
 				if w := a.Windows[id]; a.Provider == provider && w != nil {
 					pw.Scope, pw.LengthSec = w.Scope, w.LengthSec
@@ -747,7 +815,8 @@ func (e *Engine) Snapshot() Status {
 				if !ok {
 					continue
 				}
-				ws := KeyWindowStatus{WindowUsage: wu, Unenforced: len(e.uncappedLocked(provider, id)) > 0}
+				open, _, _ := e.openLocked(provider, id, "", now)
+				ws := KeyWindowStatus{WindowUsage: wu, Unenforced: len(open) > 0}
 				if v, ok := limitFor(b.OwnShare, id); ok {
 					ws.OwnLimit = &v
 					ws.Blocked = ws.Blocked || (wu.OwnKnown && wu.OwnShare >= v)

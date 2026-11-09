@@ -54,8 +54,11 @@ shows "calibrating" and only pool ceilings apply.
 
 A window only limits the pool when every account has it. If an account's usage endpoint stops
 reporting a window (a plan without a 5-hour limit, say), the window is dropped from that account
-after two polls in a row, and while any account lacks it, budgets on it aren't enforced: that
-account can always serve the request. The status and the page mark such windows "not enforced".
+after two polls in a row. While such an account can serve a request, budgets on that window aren't
+enforced for it. Once the account is out of another limit that applies (its weekly window at 100%,
+say), they are again, until it's back; a refused request's `Retry-After` counts its return. The
+status lists these accounts per pool window (`uncapped`, and `uncapped_out` with `uncapped_back_at`
+for those out of quota), and the page marks the windows "not enforced" or "enforced for now".
 
 ## Install
 
