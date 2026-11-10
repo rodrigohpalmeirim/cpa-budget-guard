@@ -580,3 +580,25 @@ func TestUncappedAccountOutOfQuotaEnforcesAgain(t *testing.T) {
 		t.Fatalf("blocked after the uncapped account's weekly reset: %+v", d)
 	}
 }
+
+func TestNoLimitOverridesFallback(t *testing.T) {
+	e, _ := testEngine(t, `keys: [{name: laptop, key: sk-laptop, budgets: {claude: {pool_ceiling: {"*": 50, 5h: -1}}}}]`)
+	e.ApplyObservations("a", "claude", []Observation{
+		{Window: "5h", Util: 90, ResetsAt: t0.Add(2 * time.Hour), LengthSec: 5 * 3600},
+		{Window: "7d", Util: 10, ResetsAt: t0.Add(72 * time.Hour), LengthSec: 7 * 86400},
+	})
+	if d := e.Check(CallerScope("sk-laptop"), "claude-opus-5-5"); !d.Allow {
+		t.Fatalf("blocked on a window set to no limit: %+v", d)
+	}
+	for _, w := range e.Snapshot().Keys[0].Providers[0].Windows {
+		if w.Window == "5h" && w.PoolCeiling != nil {
+			t.Fatalf("5h still shows a ceiling: %v", *w.PoolCeiling)
+		}
+		if w.Window == "7d" && (w.PoolCeiling == nil || *w.PoolCeiling != 50) {
+			t.Fatal("7d lost the fallback")
+		}
+	}
+	if _, err := ParseConfig([]byte(`keys: [{name: x, key: sk-xxxxxxxx, budgets: {claude: {own_share: {5h: -2}}}}]`)); err == nil {
+		t.Fatal("accepted -2")
+	}
+}

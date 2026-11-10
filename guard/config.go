@@ -41,7 +41,8 @@ type KeyConfig struct {
 }
 
 // ProviderBudget holds per-window limits in percent. Window IDs look like "5h", "7d" or "7d:fable";
-// "*" applies to every window without an explicit entry.
+// "*" applies to every window without an explicit entry; a window set to -1 (NoLimit) has no
+// limit even when "*" gives one.
 type ProviderBudget struct {
 	// OwnShare caps this key's own estimated usage, as a percent of the whole pool's window.
 	OwnShare map[string]float64 `yaml:"own_share"`
@@ -114,8 +115,8 @@ func ParseConfig(raw []byte) (Config, error) {
 		for provider, b := range k.Budgets {
 			for _, m := range []map[string]float64{b.OwnShare, b.PoolCeiling} {
 				for w, pct := range m {
-					if pct < 0 || pct > 100 {
-						return cfg, fmt.Errorf("keys[%s].budgets.%s: %s=%v must be between 0 and 100", k.Name, provider, w, pct)
+					if (pct < 0 || pct > 100) && pct != NoLimit {
+						return cfg, fmt.Errorf("keys[%s].budgets.%s: %s=%v must be between 0 and 100, or -1 for no limit", k.Name, provider, w, pct)
 					}
 				}
 			}
@@ -142,11 +143,17 @@ func lowerKeys(m map[string]float64) map[string]float64 {
 }
 
 // limitFor returns the limit configured for window (falling back to "*").
+// NoLimit as a window's value turns that window's limit off, overriding the "*" fallback.
+const NoLimit = -1
+
 func limitFor(m map[string]float64, window string) (float64, bool) {
-	if v, ok := m[window]; ok {
-		return v, true
+	v, ok := m[window]
+	if !ok {
+		v, ok = m["*"]
 	}
-	v, ok := m["*"]
+	if v == NoLimit {
+		return 0, false
+	}
 	return v, ok
 }
 

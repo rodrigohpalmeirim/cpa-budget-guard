@@ -496,17 +496,21 @@ function editKey(idx) {
     const b = (orig.budgets || {})[p] || {}; const own = b.own_share || {}, ceil = b.pool_ceiling || {};
     const rows = pw[p].concat(["*"]);
     return `<table class="edit" data-p="${p}"><tr><th>Window</th><th>Own share</th><th>Pool ceiling</th></tr>` + rows.map((w) =>
-      `<tr><td>${esc(windowLabel(w))}${w === "*" ? '<div class="hint">fallback for windows without a value</div>' : ""}${w !== "*" && (offNote(p, w) || outNote(p, w)) ? `<div class="hint">${esc(offNote(p, w) || outNote(p, w))}</div>` : ""}</td>
-        <td class="w"><div class="pct"><input class="input num" type="number" min="0" max="100" step="1" data-k="own" data-w="${esc(w)}" value="${own[w] ?? ""}" placeholder="–"></div></td>
-        <td class="w"><div class="pct"><input class="input num" type="number" min="0" max="100" step="1" data-k="ceil" data-w="${esc(w)}" value="${ceil[w] ?? ""}" placeholder="–"></div></td></tr>`).join("") + `</table>`;
+      `<tr><td>${esc(windowLabel(w))}${w === "*" ? '<div class="hint">windows not listed here</div>' : ""}${w !== "*" && (offNote(p, w) || outNote(p, w)) ? `<div class="hint">${esc(offNote(p, w) || outNote(p, w))}</div>` : ""}</td>
+        ${[["own", own], ["ceil", ceil]].map(([k, m]) => {
+          // A listed window without a value of its own gets "*" in the plugin: show that.
+          const v = w in m ? m[w] : w === "*" ? undefined : m["*"];
+          return `<td class="w"><div class="pct"><input class="input num" type="text" inputmode="decimal" data-k="${k}" data-w="${esc(w)}" value="${v == null || v === -1 ? "" : v}" placeholder="–"></div></td>`;
+        }).join("")}</tr>`).join("") + `</table>`;
   };
   const body = `<div class="field"><label for="kn">Name</label><input class="input" id="kn" value="${esc(orig.name)}" placeholder="laptop, ci-runner, …">
       <span class="hint">One key per machine or CLI.</span></div>
     <div class="field"><label>API key</label><div class="keyline"><input class="input" id="kk" value="${esc(orig.key)}" spellcheck="false">
       <button class="btn btn-secondary btn-sm" id="kcopy" type="button">${ICON.copy}Copy</button><button class="btn btn-secondary btn-sm" id="kgen" type="button">New</button></div>
-      <span class="hint">Added to the proxy's client keys on save. Leave a limit empty for no limit.</span></div>
+      <span class="hint">Added to the proxy's client keys on save.</span></div>
     <div class="tabs">${provs.map((p, i) => `<button class="tab${i ? "" : " on"}" data-tab="${p}" type="button">${esc(PROVIDERS[p] || p)}</button>`).join("")}</div>
     ${provs.map((p, i) => `<div data-pane="${p}"${i ? ' hidden' : ""}>${table(p)}</div>`).join("")}
+    <p class="hint" style="margin-top:8px">Leave a limit empty for no limit. <b>All other windows</b> covers windows not listed here, such as ones a provider adds later.</p>
     <div class="err-text" id="kerr"></div>`;
   const m = modal(isNew ? "Add key" : "Edit " + orig.name, body,
     `<button class="btn btn-secondary" data-close>Cancel</button><button class="btn btn-primary" id="ksave">${isNew ? "Create key" : "Save"}</button>`);
@@ -527,11 +531,17 @@ function editKey(idx) {
     let bad = "";
     m.el.querySelectorAll("table.edit").forEach((tb) => {
       const own = {}, ceil = {};
-      tb.querySelectorAll("input").forEach((inp) => {
-        if (inp.value === "") return;
-        const v = Number(inp.value);
+      // Empty = no limit. The plugin applies "*" to windows without a value of their own, so an
+      // empty listed window is saved as -1 (no limit) while "*" has one.
+      const fallback = {};
+      tb.querySelectorAll('input.num[data-w="*"]').forEach((inp) => { if (inp.value.trim() !== "") fallback[inp.dataset.k] = true; });
+      tb.querySelectorAll("input.num").forEach((inp) => {
+        const raw = inp.value.trim().replace(",", ".").replace(/%$/, "");
+        const into = inp.dataset.k === "own" ? own : ceil;
+        if (raw === "") { if (inp.dataset.w !== "*" && fallback[inp.dataset.k]) into[inp.dataset.w] = -1; return; }
+        const v = Number(raw);
         if (!(v >= 0 && v <= 100)) { bad = "Limits must be between 0 and 100."; return; }
-        (inp.dataset.k === "own" ? own : ceil)[inp.dataset.w] = v;
+        into[inp.dataset.w] = v;
       });
       if (Object.keys(own).length || Object.keys(ceil).length) {
         budgets[tb.dataset.p] = {};

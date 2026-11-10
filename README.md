@@ -106,7 +106,7 @@ gives ready-to-paste settings for Claude Code, Codex CLI and OpenAI-compatible c
           budgets:
             claude:
               own_share:    {5h: 30, 7d: 20, "7d:fable": 10}
-              pool_ceiling: {"*": 90}   # "*" = every window without an explicit value
+              pool_ceiling: {"*": 90, "7d:fable": -1}   # "*" = every window without a value; -1 = no limit
             codex:
               own_share: {"*": 50}
       pricing:                   # optional weight overrides, first match wins (USD per 1M tokens)
