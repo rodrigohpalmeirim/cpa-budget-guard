@@ -60,6 +60,27 @@ say), they are again, until it's back; a refused request's `Retry-After` counts 
 status lists these accounts per pool window (`uncapped`, and `uncapped_out` with `uncapped_back_at`
 for those out of quota), and the page marks the windows "not enforced" or "enforced for now".
 
+### Early resets
+
+The provider can give usage back before a window's reset time: a reset of the whole window, or a
+model reset that returns one model's usage (the model's weekly window drops, and the weekly window
+for all models drops by that usage). The reset time stays the same, so budget-guard goes by the
+utilization: a drop within a period that a second reading confirms gives back the matching spend.
+
+- A model reset: each key's spend on that model comes off the weekly window too, so the keys that
+  used it get the room back.
+- Any other drop gives back the same fraction of every key's spend (all of it when the window is
+  back at 0%).
+
+Calibration is kept (its bounds still hold, also after a plan upgrade, which the estimate catches
+up with as new segments come in). For windows the usage endpoint lists, only a poll confirms a
+drop, since only it shows whether a model window went with it. While a drop waits, accounts are
+polled every 30 seconds.
+
+CLIProxyAPI puts an account that ran out in cooldown until the reset time it was given. When usage
+comes back early and none of the account's windows is used up, budget-guard clears that cooldown
+(`host.routing.reset_cooldown`), so the account serves again without a manual reset.
+
 ## Install
 
 Requires CLIProxyAPI v8 with plugin support. It was built against v8.0.48, plugin C ABI v1, RPC

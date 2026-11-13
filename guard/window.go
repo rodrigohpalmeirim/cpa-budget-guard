@@ -63,7 +63,7 @@ type Window struct {
 	EdgeSource string             `json:"edge_source,omitempty"`
 	Last       map[string]Reading `json:"last,omitempty"` // per source, current period
 	// A drop in utilization within a period waits here for a second reading: one drop alone is
-	// treated as a stray reading, a confirmed one as a changed limit (e.g. a plan upgrade).
+	// treated as a stray reading, a confirmed one as usage given back early (see Credit).
 	PendingDrop time.Time `json:"pending_drop,omitempty"`
 }
 
@@ -126,10 +126,52 @@ func (w *Window) AddCost(key string, cost float64, now time.Time) {
 	}
 }
 
+// keep scales the period's spend down to fraction f and returns what was given back.
+func (w *Window) keep(f float64) (proxy float64, keys map[string]float64) {
+	keys = map[string]float64{}
+	for k, c := range w.KeyCost {
+		keys[k] = c * (1 - f)
+	}
+	proxy = w.ProxyCost * (1 - f)
+	w.giveBack(proxy, keys)
+	return proxy, keys
+}
+
+// giveBack takes spend off the current period (never below zero).
+func (w *Window) giveBack(proxy float64, keys map[string]float64) {
+	w.ProxyCost = max(0, w.ProxyCost-proxy)
+	for k, c := range keys {
+		if left := w.KeyCost[k] - c; left > 1e-9 {
+			w.KeyCost[k] = left
+		} else {
+			delete(w.KeyCost, k)
+		}
+	}
+	if len(w.KeyCost) == 0 {
+		w.KeyCost = nil
+	}
+	w.Anchor = nil // its cost no longer lines up with the period's
+}
+
+// Credit is a drop in utilization within a period: usage the provider gave back early (a reset
+// of the window, a model reset that returns one model's usage) or a larger plan.
+type Credit struct {
+	From, To float64
+}
+
+// kept is the fraction of the period's usage that still counts.
+func (c Credit) kept() float64 {
+	if c.From <= 0 {
+		return 0
+	}
+	return max(0, min(1, c.To/c.From))
+}
+
 // Observe applies a utilization reading, detecting resets and closing calibration segments.
-// It reports whether the window's limit changed within the period, which invalidates the
-// account's calibration.
-func (w *Window) Observe(o Observation, now time.Time, step float64) (limitChanged bool) {
+// It returns the credit when a drop within the period is confirmed (by an earlier low reading of
+// this window, or by corroborated: one of another window of the account); the caller gives back
+// the matching share of the period's spend.
+func (w *Window) Observe(o Observation, now time.Time, step float64, corroborated bool) (credit *Credit) {
 	w.expire(now)
 	if o.LengthSec > 0 {
 		w.LengthSec = o.LengthSec
@@ -140,13 +182,23 @@ func (w *Window) Observe(o Observation, now time.Time, step float64) (limitChang
 	prev, seen := w.Last[o.Source]
 	samePeriod := !w.ResetsAt.IsZero() && !o.ResetsAt.IsZero() && !o.ResetsAt.After(w.ResetsAt.Add(resetTolerance))
 	if seen && samePeriod && o.Util+1.5 < prev.Util {
-		if w.PendingDrop.IsZero() {
-			w.PendingDrop = now // a stray reading, unless the next one confirms it
-			return false
+		// One low reading alone is a stray one, unless the next confirms it. A polled window takes
+		// the drop from the usage endpoint only: it lists every window, so a model reset (whose
+		// scoped window drops in the same reading) can be told apart from a reset of everything.
+		if (w.PendingDrop.IsZero() && !corroborated) || (o.Source == SourceHeader && w.Polled) {
+			if w.PendingDrop.IsZero() {
+				w.PendingDrop = now
+			}
+			return nil
 		}
-		// Utilization stays lower within the same period: the limit itself changed.
-		limitChanged, seen = true, false
-		w.Anchor, w.Segments, w.Last = nil, nil, nil
+		// Measured from the value in use, so the other source seeing the same drop adds nothing.
+		if o.Util < w.Util {
+			credit = &Credit{From: w.Util, To: o.Util}
+		}
+		// Calibration stays: its segments are still lower bounds on capacity (also after a plan
+		// upgrade, which the estimate catches up with as new segments come in).
+		seen = false
+		w.Anchor, w.Last = nil, nil
 	}
 	w.PendingDrop = time.Time{}
 	reset := false
@@ -178,7 +230,7 @@ func (w *Window) Observe(o Observation, now time.Time, step float64) (limitChang
 	}
 	w.ObservedAt = now
 	if o.Source != w.EdgeSource {
-		return limitChanged
+		return credit
 	}
 	// Calibrate only at edges: the first reading after the whole-percent value rose. The true
 	// utilization has just crossed the shown value there, so the rounding error of both ends is
@@ -199,7 +251,7 @@ func (w *Window) Observe(o Observation, now time.Time, step float64) (limitChang
 			w.Anchor = &Anchor{Util: o.Util, Cost: w.ProxyCost, At: now}
 		}
 	}
-	return limitChanged
+	return credit
 }
 
 // Calibration quality levels.

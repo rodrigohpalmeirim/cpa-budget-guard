@@ -181,13 +181,47 @@ func (e *Engine) providerForModelLocked(model string) string {
 	return ""
 }
 
+// PollResult is what one poll of an account changed.
+type PollResult struct {
+	// Credits are the windows whose usage was given back early (by window ID).
+	Credits map[string]Credit
+	// Available: usage was given back and no window of the account is used up now, so the host
+	// can drop the cooldown it set when the account ran out (it would otherwise wait for the
+	// reset time it was given, which an early reset doesn't move).
+	Available bool
+}
+
 // ApplyObservations records readings polled from an account's usage endpoint.
-func (e *Engine) ApplyObservations(accountID, provider string, obs []Observation) {
+func (e *Engine) ApplyObservations(accountID, provider string, obs []Observation) PollResult {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	now := e.now()
 	a := e.account(accountID, provider)
-	e.applyLocked(a, obs, SourcePoll, e.now())
+	credits := e.applyLocked(a, obs, SourcePoll, now)
 	e.dropUnreportedLocked(a, obs)
+	if len(credits) == 0 {
+		return PollResult{}
+	}
+	return PollResult{Credits: credits, Available: !a.exhausted(now)}
+}
+
+// DropPending reports whether some window has held a drop for the next poll to confirm for
+// less than maxAge (older ones wait for the regular poll).
+func (e *Engine) DropPending(maxAge time.Duration) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	now := e.now()
+	for _, a := range e.accounts {
+		if a.Disabled {
+			continue
+		}
+		for _, w := range a.Windows {
+			if !w.PendingDrop.IsZero() && now.Sub(w.PendingDrop) < maxAge {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // dropUnreportedLocked forgets windows the usage endpoint reported before and now keeps leaving
@@ -228,24 +262,86 @@ func (e *Engine) dropUnreportedLocked(a *Account, obs []Observation) {
 	}
 }
 
-func (e *Engine) applyLocked(a *Account, obs []Observation, source string, now time.Time) {
+// applyLocked records readings and returns the windows that gave usage back early.
+func (e *Engine) applyLocked(a *Account, obs []Observation, source string, now time.Time) map[string]Credit {
 	if len(obs) == 0 {
-		return
+		return nil
 	}
+	// A poll lists all windows at once: when an earlier reading already showed a drop on one of
+	// them, the drops in this poll are confirmed together, so a model reset's scoped window
+	// isn't left a reading behind the window that counts all models.
+	corroborated := false
+	if source == SourcePoll {
+		for _, o := range obs {
+			if w := a.Windows[o.Window]; w != nil && !w.PendingDrop.IsZero() {
+				corroborated = true
+			}
+		}
+	}
+	credits := map[string]Credit{}
 	for i := range obs {
 		obs[i].Source = source
 		w := a.window(obs[i])
 		w.Polled = w.Polled || source == SourcePoll
-		if w.Observe(obs[i], now, e.cfg.CalibrationStep) {
-			// A plan change moves every window of the account, including ones idle right now.
-			a.Ratios, a.LastPairs = nil, nil
-			for _, w := range a.Windows {
-				w.Anchor, w.Segments = nil, nil
-			}
+		if c := w.Observe(obs[i], now, e.cfg.CalibrationStep, corroborated); c != nil {
+			credits[obs[i].Window] = *c
 		}
+	}
+	if len(credits) > 0 {
+		a.refund(credits)
 	}
 	e.updateRatiosLocked(a, obs, source)
 	e.dirty = true
+	return credits
+}
+
+// refund gives back the spend that early credits returned. A model reset returns one model's
+// usage: its scoped window drops, and the window that counts all models drops by that usage, so
+// exactly that model's spend comes off there too. Any other drop gives back the same fraction of
+// every key's spend (all of it when the window was reset to zero).
+func (a *Account) refund(credits map[string]Credit) {
+	type freed struct {
+		proxy float64
+		keys  map[string]float64
+	}
+	byLength := map[int64]*freed{}
+	for id, c := range credits {
+		w := a.Windows[id]
+		if w.Scope == "" {
+			continue
+		}
+		proxy, keys := w.keep(c.kept())
+		f := byLength[w.LengthSec]
+		if f == nil {
+			f = &freed{keys: map[string]float64{}}
+			byLength[w.LengthSec] = f
+		}
+		f.proxy += proxy
+		for k, v := range keys {
+			f.keys[k] += v
+		}
+	}
+	for id, c := range credits {
+		w := a.Windows[id]
+		if w.Scope != "" {
+			continue
+		}
+		if f := byLength[w.LengthSec]; f != nil && c.To >= 1 {
+			w.giveBack(f.proxy, f.keys)
+		} else {
+			w.keep(c.kept())
+		}
+	}
+}
+
+// exhausted reports whether any of the account's windows is used up right now.
+func (a *Account) exhausted(now time.Time) bool {
+	for _, w := range a.Windows {
+		if w.EffectiveUtil(now) >= 100 {
+			return true
+		}
+	}
+	return false
 }
 
 // baseWindow is the shortest unscoped window an account has.

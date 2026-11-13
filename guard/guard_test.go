@@ -392,7 +392,7 @@ func TestOldCalibrationIsDiscarded(t *testing.T) {
 	}
 }
 
-func TestPlanUpgradeIsAcceptedAndRecalibrates(t *testing.T) {
+func TestPlanUpgradeIsAcceptedAndCalibrationCatchesUp(t *testing.T) {
 	e, c := testEngine(t, "keys: [{name: laptop, key: sk-laptop}]")
 	s := newSim(e, c, "acct-1", 200)
 	for i := 0; i < 120; i++ {
@@ -415,11 +415,9 @@ func TestPlanUpgradeIsAcceptedAndRecalibrates(t *testing.T) {
 	if w := a.Windows["5h"]; w.Util > 20 {
 		t.Fatalf("confirmed drop not accepted: util %v", w.Util)
 	}
-	if _, q := a.Capacity("5h"); q == QualityCalibrated {
-		t.Fatal("old calibration kept after the limit changed")
-	}
-	if a.Ratios != nil || len(a.Windows["7d"].Segments) != 0 {
-		t.Fatal("other windows kept their calibration")
+	// The old segments are still lower bounds, so calibration stays and only climbs from here.
+	if _, q := a.Capacity("5h"); q != QualityCalibrated {
+		t.Fatalf("calibration dropped: %s", q)
 	}
 	for i := 0; i < 240; i++ {
 		s.request("sk-laptop")
@@ -578,6 +576,136 @@ func TestUncappedAccountOutOfQuotaEnforcesAgain(t *testing.T) {
 	c.t = back.Add(time.Minute)
 	if d := e.Check(laptop, "claude-opus-5-5"); !d.Allow {
 		t.Fatalf("blocked after the uncapped account's weekly reset: %+v", d)
+	}
+}
+
+// resetSetup polls one account with 5h, 7d and 7d:fable windows and books $10 of Fable on
+// laptop and $20 of another model on ci (Fable counts in both weekly windows).
+func resetSetup(t *testing.T) (*Engine, *clock, func(u5, u7, fable float64) PollResult) {
+	t.Helper()
+	e, c := testEngine(t, "keys: [{name: laptop, key: sk-laptop}, {name: ci, key: sk-ci}]")
+	r5, r7 := t0.Add(3*time.Hour), t0.Add(48*time.Hour)
+	poll := func(u5, u7, fable float64) PollResult {
+		return e.ApplyObservations("acct", "claude", []Observation{
+			{Window: "5h", Util: u5, ResetsAt: r5, LengthSec: 5 * 3600},
+			{Window: "7d", Util: u7, ResetsAt: r7, LengthSec: 7 * 86400},
+			{Window: "7d:fable", Scope: "model:fable", Util: fable, ResetsAt: r7, LengthSec: 7 * 86400},
+		})
+	}
+	poll(10, 80, 50)
+	for i := 0; i < 10; i++ {
+		e.HandleUsage(Usage{APIKey: "sk-laptop", AuthID: "acct", Provider: "claude", Model: "claude-test-fable", Tokens: Tokens{Output: 1e6}})
+	}
+	for i := 0; i < 20; i++ {
+		e.HandleUsage(Usage{APIKey: "sk-ci", AuthID: "acct", Provider: "claude", Model: "claude-test", Tokens: Tokens{Output: 1e6}})
+	}
+	// Calibration learned earlier in the period.
+	e.accounts["acct"].Windows["7d"].Segments = []Segment{{DCost: 30, DUtil: 2}, {DCost: 30, DUtil: 2}, {DCost: 30, DUtil: 2}}
+	return e, c, poll
+}
+
+func TestEarlyResetGivesSpendBackAndKeepsCalibration(t *testing.T) {
+	e, c, poll := resetSetup(t)
+	w7 := e.accounts["acct"].Windows["7d"]
+	if res := poll(10, 0, 0); len(res.Credits) != 0 || w7.Util != 80 {
+		t.Fatalf("a single low reading was accepted: %+v, util %v", res, w7.Util)
+	}
+	if !e.DropPending(10 * time.Minute) {
+		t.Fatal("no drop pending after the first low reading")
+	}
+	c.add(30 * time.Second)
+	res := poll(10, 0, 0)
+	if len(res.Credits) != 2 || !res.Available {
+		t.Fatalf("result %+v", res)
+	}
+	for _, id := range []string{"7d", "7d:fable"} {
+		w := e.accounts["acct"].Windows[id]
+		if w.Util != 0 || w.ProxyCost != 0 || w.KeyCost != nil {
+			t.Fatalf("%s: util %v, cost %v, keys %v", id, w.Util, w.ProxyCost, w.KeyCost)
+		}
+	}
+	if _, q := e.accounts["acct"].Capacity("7d"); q != QualityCalibrated {
+		t.Fatalf("calibration lost: %s", q)
+	}
+	if e.DropPending(10 * time.Minute) {
+		t.Fatal("drop still pending")
+	}
+	if w5 := e.accounts["acct"].Windows["5h"]; w5.KeyCost["ci"] != 20 {
+		t.Fatalf("5h spend changed: %v", w5.KeyCost)
+	}
+	// The window keeps counting from there.
+	e.HandleUsage(Usage{APIKey: "sk-ci", AuthID: "acct", Provider: "claude", Model: "claude-test", Tokens: Tokens{Output: 1e6}})
+	if w7.KeyCost["ci"] != 1 {
+		t.Fatalf("7d after the reset: %v", w7.KeyCost)
+	}
+}
+
+func TestModelResetGivesBackThatModelsSpend(t *testing.T) {
+	e, c, poll := resetSetup(t)
+	poll(10, 60, 0)
+	c.add(30 * time.Second)
+	res := poll(10, 60, 0)
+	if len(res.Credits) != 2 || !res.Available {
+		t.Fatalf("result %+v", res)
+	}
+	a := e.accounts["acct"]
+	if k := a.Windows["7d"].KeyCost; k["laptop"] != 0 || k["ci"] != 20 {
+		t.Fatalf("7d keys after a Fable reset: %v", k)
+	}
+	near(t, "7d proxy cost", a.Windows["7d"].ProxyCost, 20, 1e-9)
+	if k := a.Windows["7d:fable"].KeyCost; k != nil {
+		t.Fatalf("Fable keys: %v", k)
+	}
+}
+
+func TestPartialDropGivesBackItsShare(t *testing.T) {
+	e, c, poll := resetSetup(t)
+	poll(10, 40, 50)
+	c.add(30 * time.Second)
+	if res := poll(10, 40, 50); len(res.Credits) != 1 {
+		t.Fatalf("result %+v", res)
+	}
+	a := e.accounts["acct"]
+	if k := a.Windows["7d"].KeyCost; math.Abs(k["laptop"]-5) > 1e-9 || math.Abs(k["ci"]-10) > 1e-9 {
+		t.Fatalf("7d keys after halving: %v", k)
+	}
+	if k := a.Windows["7d:fable"].KeyCost; k["laptop"] != 10 {
+		t.Fatalf("Fable keys changed: %v", k)
+	}
+}
+
+func TestHeaderDropOnPolledWindowWaitsForThePoll(t *testing.T) {
+	e, c, poll := resetSetup(t)
+	w7 := e.accounts["acct"].Windows["7d"]
+	headers := func(u5, u7 float64) {
+		e.HandleUsage(Usage{AuthID: "acct", Provider: "claude", Headers: http.Header{
+			"Anthropic-Ratelimit-Unified-5h-Utilization": {fmt.Sprint(u5 / 100)},
+			"Anthropic-Ratelimit-Unified-5h-Reset":       {fmt.Sprint(t0.Add(3 * time.Hour).Unix())},
+			"Anthropic-Ratelimit-Unified-7d-Utilization": {fmt.Sprint(u7 / 100)},
+			"Anthropic-Ratelimit-Unified-7d-Reset":       {fmt.Sprint(t0.Add(48 * time.Hour).Unix())},
+		}})
+	}
+	headers(100, 80)
+	for i := 0; i < 3; i++ {
+		c.add(10 * time.Second)
+		headers(100, 60)
+	}
+	if w7.Util != 80 || w7.KeyCost["laptop"] != 10 {
+		t.Fatalf("headers alone gave usage back: util %v, keys %v", w7.Util, w7.KeyCost)
+	}
+	// The poll confirms what the headers saw, and lists the Fable window that went with it.
+	res := poll(100, 60, 0)
+	if len(res.Credits) != 2 || w7.KeyCost["laptop"] != 0 || w7.KeyCost["ci"] != 20 {
+		t.Fatalf("result %+v, 7d keys %v", res, w7.KeyCost)
+	}
+	if res.Available {
+		t.Fatal("available while the 5h window is used up")
+	}
+	// Later headers start from the new value instead of seeing a drop again.
+	c.add(10 * time.Second)
+	headers(100, 60)
+	if w7.Util != 60 || w7.KeyCost["ci"] != 20 {
+		t.Fatalf("after the poll: util %v, keys %v", w7.Util, w7.KeyCost)
 	}
 }
 

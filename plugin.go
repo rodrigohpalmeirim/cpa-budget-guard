@@ -617,6 +617,10 @@ func saveLoop(stop chan struct{}) {
 	}
 }
 
+// confirmPoll is how soon the accounts are polled again while a drop in utilization waits for a
+// second reading.
+const confirmPoll = 30 * time.Second
+
 func pollLoop(stop chan struct{}, every time.Duration) {
 	timer := time.NewTimer(10 * time.Second) // let the host finish starting
 	defer timer.Stop()
@@ -628,7 +632,11 @@ func pollLoop(stop chan struct{}, every time.Duration) {
 			every = d
 		case <-timer.C:
 			guarded("poll", pollOnce)
-			timer.Reset(every)
+			next := every
+			if engine.DropPending(10*time.Minute) && every > confirmPoll {
+				next = confirmPoll // confirm a drop (an early reset) without waiting a whole interval
+			}
+			timer.Reset(next)
 		}
 	}
 }
@@ -748,7 +756,17 @@ func pollOnce() {
 			logf("warn", "budget-guard: usage for %s (%s): %v", in.Label, in.Provider, err)
 			continue
 		}
-		engine.ApplyObservations(in.ID, in.Provider, obs)
+		res := engine.ApplyObservations(in.ID, in.Provider, obs)
+		for id, c := range res.Credits {
+			logf("info", "budget-guard: %s's %s window dropped from %.0f%% to %.0f%% before its reset time; its spend in the window was given back", in.Label, id, c.From, c.To)
+		}
+		if res.Available && in.AuthIndex != "" {
+			if err := callHost("host.routing.reset_cooldown", map[string]any{"auth_index": in.AuthIndex}, nil); err != nil {
+				logf("warn", "budget-guard: clearing %s's cooldown after its early reset: %v", in.Label, err)
+			} else {
+				logf("info", "budget-guard: cleared %s's cooldown: it has usage again", in.Label)
+			}
+		}
 		lifeMu.Lock()
 		l := reqLog
 		lifeMu.Unlock()
